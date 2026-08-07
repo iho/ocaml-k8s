@@ -112,18 +112,22 @@ LIST+WATCH client. Current status per module:
 | `Reflector` | done — List-then-Watch-forever, full resync-as-sync-events on every (re)LIST (incl. on 410/dropped connection) with capped exponential backoff; see `bin/reflector_demo.ml` |
 | `Workqueue` | done — `Eio.Mutex`/`Eio.Condition`-backed dedup queue + per-item exponential backoff; see `test/test_workqueue.ml` |
 | `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.t`, N worker fibers; see `bin/controller_demo.ml` |
-| `Manager` | stub — multi-controller aggregation + graceful shutdown, not implemented |
+| `Manager` | done — multi-controller aggregation, centralised SIGINT/SIGTERM handling; see `bin/manager_demo.ml` |
 
-`bin/main.ml` doesn't use `Reflector`/`Controller`/`Manager` yet — it calls
-`Client.list`/`Client.watch` directly, same shape as the original hardcoded
-version, just parameterised by `Resource.Unstructured` for Pods instead of
-hand-written paths/JSON decoding. Two separate, minimal demo tools exercise
-the higher layers directly against a real cluster:
+This completes the roadmap's core bottom-up build-out (`Phase 6` — health
+checks, leader election — remains future work; see stub signatures in
+`lib/manager.mli`). `bin/main.ml` still doesn't use
+`Reflector`/`Controller`/`Manager` — it calls `Client.list`/`Client.watch`
+directly, same shape as the original hardcoded version, just parameterised
+by `Resource.Unstructured` for Pods instead of hand-written paths/JSON
+decoding. Three separate, minimal demo tools exercise the higher layers
+directly against a real cluster:
 
 ```sh
 kubectl proxy --port=8001 &
 dune exec bin/reflector_demo.exe -- kube-system   # Reflector + Cache only
 dune exec bin/controller_demo.exe -- kube-system  # full Reflector->Workqueue->Reconciler loop
+dune exec bin/manager_demo.exe -- kube-system     # two controllers (Pods + ConfigMaps) under one Manager
 ```
 
 ## Notes / limitations
@@ -158,6 +162,48 @@ dune exec bin/controller_demo.exe -- kube-system  # full Reflector->Workqueue->R
   once `bin/controller_demo.ml` was Ctrl-C'd against a real cluster; a
   regression test (`test_cancel_while_blocked_in_get_does_not_poison`) was
   added and confirmed to fail against the old code before the fix.
+- Registering multiple controllers against the same `kubectl proxy`
+  (HTTP/1.1) endpoint needs a separate `Client`/`Context` per controller
+  — see `bin/manager_demo.ml`'s header comment. A Reflector's WATCH is a
+  long-lived streaming request; sharing one HTTP/1.1 connection across
+  controllers means every controller after the first just queues forever
+  behind the first one's never-ending watch, with no error or timeout to
+  surface it. Found by running `manager_demo` with one shared client: the
+  second controller silently never printed anything, ever. Real clusters
+  over TLS negotiate HTTP/2, which genuinely multiplexes and wouldn't hit
+  this, but one connection per controller avoids the failure mode either
+  way — and avoids one connection's traffic being able to affect another's
+  regardless of protocol.
+- **Bug found via end-to-end testing, now fixed — a real deadlock**:
+  `Manager.run` originally took no `~sw` and created its own private
+  `Switch` for the controllers, specifically so it could fully own
+  catching its own shutdown and return normally instead of raising
+  (avoiding a `try ... with Exit` at every call site). Running
+  `manager_demo` (two controllers, two `Client`s) and sending SIGINT hung
+  *indefinitely* — not slowly, forever. Root cause: a `Client`'s
+  connection-management fibers run on whatever switch it was built with
+  (the *outer* switch, since `Client`s are built before any `Controller`
+  exists); Manager's private inner switch being cancelled only stopped the
+  controllers, not those connection fibers. Normal (non-cancelling)
+  teardown of the outer switch then waits for those fibers to finish
+  before running any `on_release` cleanup — but they only finish once
+  `Client`'s `on_release` hook calls `Piaf.Client.shutdown` on them, which
+  never runs because the wait-for-fibers phase it's blocked behind never
+  completes. A genuine cycle. Diagnosed by adding temporary `traceln`
+  calls around the shutdown hook and observing they never fired at all —
+  proving the hang wasn't inside Piaf as first suspected, but before the
+  release hooks ran at all. Fixed by having `Manager.run` take `~sw` and
+  share the caller's switch (the same one the `Client`s were built with)
+  instead of owning a private one, so cancelling it takes down the
+  connection-management fibers the same way it already does every other
+  fiber in this framework. Re-verified: clean exit in ~1s across 6
+  repeated runs, vs. never completing (one run was left for 74s, another
+  killed after being stuck well past that) before the fix. `Client.ml`
+  also now bounds `Piaf.Client.shutdown` itself to 3s via
+  `Eio.Time.with_timeout_exn`, defensively, independent of this fix — a
+  slow graceful HTTP/2 close (GOAWAY, drain) on any single connection
+  shouldn't be able to hold up every other resource's cleanup, since
+  `Switch.on_release` hooks run in series, not concurrently.
 
 ## Manual verification
 
@@ -187,3 +233,9 @@ multiple times as the library grew:
   create/modify/delete lifecycle. Ctrl-C testing during this same run also
   surfaced the `Workqueue.get` mutex-poisoning bug described above; fixed,
   and re-verified clean (exit 0) across several repeated Ctrl-C runs.
+- **`Manager`**: `bin/manager_demo.ml` (Pods + ConfigMaps controllers,
+  each with its own `Client`/`Context`, both created and reconciled all
+  8+9 pre-existing objects at startup correctly) — this is where both the
+  HTTP/1.1 connection-sharing starvation bug and the private-switch
+  shutdown deadlock described above were found and fixed. Re-verified
+  clean (~1s to exit) across 6 repeated Ctrl-C runs after both fixes.

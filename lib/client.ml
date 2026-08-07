@@ -56,7 +56,17 @@ let create ~sw env ~base_url ?token ?ca_cert ?(insecure = false) () =
   match Piaf.Client.create ~config ~sw env (Uri.of_string base_url) with
   | Error e -> Error (Error.Http (Piaf.Error.to_string e))
   | Ok piaf ->
-    Eio.Switch.on_release sw (fun () -> Piaf.Client.shutdown piaf);
+    Eio.Switch.on_release sw (fun () ->
+      (* Bounded defensively: an HTTP/2-level graceful close (GOAWAY, then
+         waiting for the read/write loops to finish) could in principle
+         take a while to complete against a slow or unresponsive peer, and
+         since [Switch.on_release] hooks run in series, that would delay
+         every other resource still being released after this one. The
+         process is exiting either way, so there's no reason to wait long:
+         abandon the connection — the OS reclaims the socket regardless —
+         if it doesn't close promptly. *)
+      try Eio.Time.with_timeout_exn env#clock 3.0 (fun () -> Piaf.Client.shutdown piaf) with
+      | Eio.Time.Timeout -> ());
     Ok { piaf; headers }
 
 let of_env ~sw env =

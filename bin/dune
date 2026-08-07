@@ -9,3 +9,7 @@
 (executable
  (name controller_demo)
  (libraries eio eio_main piaf uri yojson k8s))
+
+(executable
+ (name manager_demo)
+ (libraries eio eio_main piaf uri yojson k8s))

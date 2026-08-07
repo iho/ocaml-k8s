@@ -1,9 +1,22 @@
-type t = unit
+type t =
+  { ctx : Context.t
+  ; mutable controllers : Controller.t list
+  }
 
-let todo name = failwith (Printf.sprintf "TODO(Phase 5/6): Manager.%s" name)
-let create ~ctx:_ () : t = ()
-let add_controller (_ : t) (_ : Controller.t) = todo "add_controller"
-let run ~sw:_ (_ : t) = todo "run"
+let create ~ctx () = { ctx; controllers = [] }
+let add_controller t c = t.controllers <- c :: t.controllers
+
+let run ~sw (t : t) =
+  let shutdown signal_name =
+    Context.log t.ctx "manager: received %s, shutting down..." signal_name;
+    Eio.Switch.fail sw Exit
+  in
+  Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ -> shutdown "SIGINT"));
+  Sys.set_signal Sys.sigterm (Sys.Signal_handle (fun _ -> shutdown "SIGTERM"));
+  Context.log t.ctx "manager: starting %d controller(s)" (List.length t.controllers);
+  List.iter (fun c -> Controller.run ~sw c) t.controllers
+
+let todo name = failwith (Printf.sprintf "TODO(Phase 6): Manager.%s" name)
 let add_health_check (_ : t) ~name:_ (_ : unit -> bool) = todo "add_health_check"
 let add_readiness_check (_ : t) ~name:_ (_ : unit -> bool) = todo "add_readiness_check"
 
