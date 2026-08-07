@@ -1,23 +1,50 @@
 (* [t] defers all construction that needs a [Switch.t] (the Workqueue, the
    Reflector, the worker fibers) into a closure captured at [create] time
    and only run when [run ~sw] supplies one. This is what lets every
-   [Make(R).create] return the same concrete, non-parameterised type: the
-   closure closes over [R] internally, and [R] never appears in [t]. *)
+   [Make(Rec).create] return the same concrete, non-parameterised type: the
+   closure closes over [Rec.R] internally, and it never appears in [t]. *)
 type t = { start : sw:Eio.Switch.t -> unit }
 
 let run ~sw (t : t) = t.start ~sw
 
-module Make (R : Resource.S) = struct
-  module Rf = Reflector.Make (R)
+module Make (Rec : Reconciler.S) = struct
+  module Rf = Reflector.Make (Rec.R)
 
-  let create ~ctx ~clock ?namespace ?label_selector ?(workers = 1) ~reconciler () : t =
+  let create ~ctx ~client ~clock ?namespace ?label_selector ?(workers = 1) () : t =
     let start ~sw =
       let wq = Workqueue.create ~sw ~clock () in
-      let on_event (ev : R.t Watch_event.t) = Workqueue.add wq ev.request in
-      let reflector = Rf.create ~ctx ?namespace ?label_selector ~on_event () in
+      let on_event (ev : Rec.R.t Watch_event.t) = Workqueue.add wq ev.request in
+      let reflector = Rf.create ~ctx ~client ?namespace ?label_selector ~on_event () in
       Eio.Fiber.fork ~sw (fun () -> Rf.run reflector);
       Cache.wait_for_sync (Rf.cache reflector);
       let cache = Rf.cache reflector in
+      (* Applies a status update, if any, *before* the reconcile's
+         requested action. Returns [false] if the update was requested but
+         failed, so the caller can override [action] with a backoff
+         requeue regardless of what the reconciler originally asked for:
+         the reconciler's intent (e.g. "Done") was computed assuming the
+         status write it asked for would actually land, so if it didn't,
+         that intent isn't trustworthy until it's retried and does. *)
+      let apply_status req (result : _ Reconcile_result.t) =
+        match result.status with
+        | None -> true
+        | Some status ->
+          (match Cache.get cache req with
+           | None ->
+             (* Genuinely gone by the time we got here (a race with a
+                DELETE, not the [None] originally handed to [reconcile] —
+                that case wouldn't return [Some status] from a well-behaved
+                reconciler, but we don't rely on that). Nothing to PUT to. *)
+             Context.log ctx "%s: reconcile returned a status update but the object is gone, skipping"
+               (Request.to_string req);
+             true
+           | Some obj ->
+             (match Client.update_status (Context.client ctx) ~resource:(module Rec.R) (Rec.R.with_status obj status) with
+              | Ok () -> true
+              | Error e ->
+                Context.log ctx "%s: status update failed: %s" (Request.to_string req) (Client.Error.to_string e);
+                false))
+      in
       let worker () =
         let rec loop () =
           match Workqueue.get wq with
@@ -30,15 +57,17 @@ module Make (R : Resource.S) = struct
                to propagate — through [Fiber.fork] that fails this
                controller's switch — rather than being silently
                swallowed into a requeue loop. *)
-            (match reconciler ctx cache req with
-             | Ok Reconciler.Result.Done -> Workqueue.forget wq req
-             | Ok Reconciler.Result.Requeue -> Workqueue.add_rate_limited wq req
-             | Ok (Reconciler.Result.Requeue_after delay) ->
-               Workqueue.forget wq req;
-               Workqueue.add_after wq req ~delay
+            (match Rec.reconcile ctx req (Cache.get cache req) with
+             | Ok result ->
+               let action = if apply_status req result then result.action else Reconcile_result.Requeue in
+               (match action with
+                | Reconcile_result.Done -> Workqueue.forget wq req
+                | Requeue -> Workqueue.add_rate_limited wq req
+                | Requeue_after delay ->
+                  Workqueue.forget wq req;
+                  Workqueue.add_after wq req ~delay)
              | Error e ->
-               Context.log ctx "reconcile %s failed: %s" (Request.to_string req)
-                 (Reconciler.Error.to_string e);
+               Context.log ctx "reconcile %s failed: %s" (Request.to_string req) (Reconcile_error.to_string e);
                Workqueue.add_rate_limited wq req);
             Workqueue.done_ wq req;
             loop ()

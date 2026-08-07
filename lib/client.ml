@@ -201,3 +201,29 @@ let watch (type a) t ~resource:(module R : Resource.S with type t = a) ?namespac
       match Piaf.Body.iter_string ~f:(line_splitter ~f:handle_line) (Piaf.Response.body response) with
       | Ok () -> Ok ()
       | Error e -> Error (Error.Http (Piaf.Error.to_string e)))
+
+(* ---------------------------------------------------------------------- *)
+(* UPDATE / UPDATE STATUS                                                 *)
+(* ---------------------------------------------------------------------- *)
+
+let put_object (type a) t ~resource:(module R : Resource.S with type t = a) ~subresource (obj : a) =
+  let base = rest_path (module R) ~namespace:(R.namespace obj) in
+  let object_path =
+    match subresource with
+    | None -> Printf.sprintf "%s/%s" base (R.name obj)
+    | Some sub -> Printf.sprintf "%s/%s/%s" base (R.name obj) sub
+  in
+  let body = Piaf.Body.of_string (Yojson.Safe.to_string (R.to_json obj)) in
+  let headers = ("content-type", "application/json") :: t.headers in
+  match Piaf.Client.put t.piaf ~headers ~body object_path with
+  | Error e -> Error (Error.Http (Piaf.Error.to_string e))
+  | Ok response ->
+    let status = Piaf.Response.status response in
+    if Piaf.Status.is_successful status
+    then Ok ()
+    else (
+      let body = match Piaf.Body.to_string (Piaf.Response.body response) with Ok b -> b | Error _ -> "" in
+      Error (Error.Http (Printf.sprintf "%s: %s" (Piaf.Status.to_string status) body)))
+
+let update t ~resource obj = put_object t ~resource ~subresource:None obj
+let update_status t ~resource obj = put_object t ~resource ~subresource:(Some "status") obj

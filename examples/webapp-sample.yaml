@@ -1,0 +1,8 @@
+apiVersion: example.com/v1
+kind: WebApp
+metadata:
+  name: hello-web
+  namespace: default
+spec:
+  image: nginx:latest
+  replicas: 3

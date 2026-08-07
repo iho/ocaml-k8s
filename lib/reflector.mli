@@ -7,6 +7,7 @@ module Make (R : Resource.S) : sig
 
   val create :
      ctx:Context.t
+    -> client:Client.t
     -> ?namespace:string
     -> ?label_selector:string
     -> ?field_selector:string
@@ -16,7 +17,19 @@ module Make (R : Resource.S) : sig
   (** Creates (but does not start) a reflector with its own, freshly
       created cache. [on_event] fires for every ADDED/MODIFIED/DELETED
       after the cache has already been updated — a [Controller] wires this
-      to [Workqueue.add]. *)
+      to [Workqueue.add].
+
+      [client] is used for this reflector's LIST+WATCH — deliberately a
+      separate parameter from [ctx] (whose [Context.client] a reconciler
+      might use for its own ad-hoc calls, e.g. status updates) rather than
+      implicitly reusing [Context.client ctx]: a WATCH is a long-lived
+      streaming request, and over an HTTP/1.1 connection (e.g.
+      `kubectl proxy`) any other request sharing that connection — like a
+      reconciler's own status PUT — queues forever behind it, with no
+      error or timeout to surface it. Found by exactly that hang, running
+      a reconciler that both watches and PUTs status over one shared
+      connection. Pass [ctx]'s own client here only if nothing using [ctx]
+      ever issues its own API calls (e.g. never writes a status). *)
 
   val cache : t -> R.t Cache.t
 

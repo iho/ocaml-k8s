@@ -6,10 +6,12 @@ event. Direct-style throughout (no Lwt/Async, no monadic binds) using
 [Piaf](https://github.com/anmonteiro/piaf) for HTTP/1.1 + HTTP/2 + TLS.
 
 `bin/main.ml` is now a thin CLI wrapper around the `k8s` library in `lib/`,
-which is the start of a higher-level operator framework (Informer/Reflector,
-Workqueue, Controller, Manager — see "Library layout & roadmap" below).
-`lib/client.ml` implements LIST+WATCH generically for any `Resource.S`, not
-just Pods.
+which is a strictly-typed operator framework (Informer/Reflector, Workqueue,
+Controller, Manager — see "Library layout & roadmap" below). `lib/client.ml`
+implements LIST+WATCH+status-updates generically for any `Resource.S`, and
+reconcilers are written against real OCaml types for the resources they own
+— including a real CRD's spec/status, decoded/encoded by hand — not raw
+JSON; see `bin/webapp_demo.ml` for a full typed example.
 
 ## Prerequisites
 
@@ -106,28 +108,38 @@ LIST+WATCH client. Current status per module:
 
 | Module | Status |
 |---|---|
-| `Gvk`, `Resource`, `Request`, `Watch_event` | done |
-| `Client` | done — LIST/WATCH generalised over any `Resource.S`, used by `bin/main.ml` |
-| `Context`, `Cache`, `Reconciler` | done |
+| `Gvk`, `Request`, `Watch_event`, `Object_meta` | done |
+| `Resource` | done — `Resource.S` includes a `status` subresource type (`status_of_json`/`status_to_json`/`status`/`with_status`); `Resource.Unstructured` and typed CRD bindings (e.g. `bin/webapp_demo.ml`'s `Web_app`) both implement it |
+| `Client` | done — LIST/WATCH/`update`/`update_status` generalised over any `Resource.S`, used by `bin/main.ml` |
+| `Context`, `Cache` | done |
 | `Reflector` | done — List-then-Watch-forever, full resync-as-sync-events on every (re)LIST (incl. on 410/dropped connection) with capped exponential backoff; see `bin/reflector_demo.ml` |
 | `Workqueue` | done — `Eio.Mutex`/`Eio.Condition`-backed dedup queue + per-item exponential backoff; see `test/test_workqueue.ml` |
-| `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.t`, N worker fibers; see `bin/controller_demo.ml` |
+| `Reconcile_result`, `Reconcile_error`, `Reconciler` | done — `Reconciler.S` bundles a `Resource.S` (`module R`) with a `reconcile : Context.t -> Request.t -> R.t option -> (R.status Reconcile_result.t, Reconcile_error.t) result`, so `Controller.Make` takes one functor argument |
+| `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.S`, N worker fibers, status-subresource PUTs; see `bin/controller_demo.ml` (untyped/`Unstructured`) and `bin/webapp_demo.ml` (typed CRD, real status update) |
 | `Manager` | done — multi-controller aggregation, centralised SIGINT/SIGTERM handling; see `bin/manager_demo.ml` |
+| `Finalizer` | done — `has`/`add`/`remove`, JSON-level (no `with_finalizers` needed on `Resource.S`); see `bin/webapp_demo.ml` |
 
-This completes the roadmap's core bottom-up build-out (`Phase 6` — health
-checks, leader election — remains future work; see stub signatures in
-`lib/manager.mli`). `bin/main.ml` still doesn't use
-`Reflector`/`Controller`/`Manager` — it calls `Client.list`/`Client.watch`
-directly, same shape as the original hardcoded version, just parameterised
-by `Resource.Unstructured` for Pods instead of hand-written paths/JSON
-decoding. Three separate, minimal demo tools exercise the higher layers
-directly against a real cluster:
+This completes the roadmap's core bottom-up build-out plus the finalizer
+extension point (`Phase 6` — health checks, leader election — remains
+future work; see stub signatures in `lib/manager.mli`). `bin/main.ml` still
+doesn't use `Reflector`/`Controller`/`Manager` — it calls
+`Client.list`/`Client.watch` directly, same shape as the original
+hardcoded version, just parameterised by `Resource.Unstructured` for Pods
+instead of hand-written paths/JSON decoding. Four separate, minimal demo
+tools exercise the higher layers directly against a real cluster:
 
 ```sh
 kubectl proxy --port=8001 &
 dune exec bin/reflector_demo.exe -- kube-system   # Reflector + Cache only
-dune exec bin/controller_demo.exe -- kube-system  # full Reflector->Workqueue->Reconciler loop
+dune exec bin/controller_demo.exe -- kube-system  # full Reflector->Workqueue->Reconciler loop, untyped (Unstructured)
 dune exec bin/manager_demo.exe -- kube-system     # two controllers (Pods + ConfigMaps) under one Manager
+
+# typed CRD example, with a real /status subresource update and finalizer:
+kubectl apply -f examples/webapp-crd.yaml
+kubectl apply -f examples/webapp-sample.yaml
+dune exec bin/webapp_demo.exe -- default
+# then, in another shell, while it's running:
+kubectl delete webapp hello-web    # stays "Terminating" until the finalizer is removed
 ```
 
 ## Notes / limitations
@@ -204,6 +216,36 @@ dune exec bin/manager_demo.exe -- kube-system     # two controllers (Pods + Conf
   slow graceful HTTP/2 close (GOAWAY, drain) on any single connection
   shouldn't be able to hold up every other resource's cleanup, since
   `Switch.on_release` hooks run in series, not concurrently.
+- A failed status PUT *overrides* the reconciler's requested action with a
+  backoff requeue, even if the reconciler said `Done` — its intent was
+  computed assuming the write would land, so if it didn't, that intent
+  isn't trustworthy until the write is retried and succeeds. This is a
+  deliberate choice, not the only reasonable one (the alternative — trust
+  the reconciler's action regardless, just log the write failure — risks a
+  status that's permanently stale until something else re-triggers a
+  reconcile); worth knowing if this surprises you in practice.
+- **Bug found via end-to-end testing, now fixed — starvation within a
+  single controller**: `bin/webapp_demo.ml`'s first version hung
+  *indefinitely* on its own first status update. Root cause: a
+  `Controller`'s `Reflector` and the reconciler's own API calls (status
+  updates) were sharing one `Client`/connection via `Context.client ctx`
+  — the same HTTP/1.1-starvation class as the earlier multi-controller
+  bug, but here within *one* controller: the reflector's long-lived WATCH
+  occupies the connection forever, so the reconciler's status PUT — issued
+  from a different fiber on the same connection — queues behind it and
+  never gets a turn. No error, no timeout, just silence, same signature as
+  the earlier bug. Fixed by giving `Reflector.Make(R).create` (and, in
+  turn, `Controller.Make(Rec).create`) its own `~client` parameter,
+  explicitly separate from `Context.client ctx`. Verified for real:
+  reset a live `WebApp`'s status to a wrong value via `kubectl patch
+  --subresource=status`, ran `webapp_demo`, and confirmed via `kubectl
+  get webapp ... -o jsonpath='{.status}'` that the program's own PUT
+  corrected it — not a previous manual test's leftover state, which was
+  ruled out by resetting first. Also confirmed the watch picking up the
+  program's own status PUT as a MODIFIED event correctly converges (a
+  second, no-op reconcile logging "already correct") instead of
+  self-triggering forever, and that Ctrl-C still cleanly closes both
+  connections (~1s exit).
 
 ## Manual verification
 
@@ -239,3 +281,29 @@ multiple times as the library grew:
   HTTP/1.1 connection-sharing starvation bug and the private-switch
   shutdown deadlock described above were found and fixed. Re-verified
   clean (~1s to exit) across 6 repeated Ctrl-C runs after both fixes.
+- **Typed CRDs / status updates**: `examples/webapp-crd.yaml` (a
+  `WebApp` CRD with a `/status` subresource enabled) and
+  `examples/webapp-sample.yaml` applied to a real cluster, then
+  `bin/webapp_demo.ml` run against it — a real OCaml record type
+  (`Web_app.t`/`Web_app.status`, using the new `Object_meta` helper), not
+  `Resource.Unstructured`. This is where the within-a-controller
+  connection-starvation bug above was found (the demo's first version
+  hung on its own status update) and fixed. After the fix: confirmed the
+  program correctly detects an already-correct status and skips the PUT,
+  confirmed it performs a real PUT when the status was deliberately reset
+  to a wrong value first (`kubectl patch --subresource=status`) — checked
+  via `kubectl get -o jsonpath` before and after, not just program output
+  — confirmed the watch converges on its own PUT instead of looping, and
+  confirmed clean Ctrl-C shutdown of both connections (~1s).
+- **`Finalizer`**: `bin/webapp_demo.ml`'s reconciler now adds
+  `webapps.example.com/cleanup` on an object's first reconcile — confirmed
+  via `kubectl get -o jsonpath='{.metadata.finalizers}'` — then, with the
+  program running, `kubectl delete webapp hello-web` was issued from
+  another shell: the object did *not* disappear immediately (blocked by
+  the finalizer, standard Kubernetes behavior), the watch delivered the
+  resulting MODIFIED event with `deletionTimestamp` set almost instantly,
+  the reconciler ran its (pretend) cleanup and called `Finalizer.remove`,
+  and `kubectl get webapp hello-web` immediately afterward returned
+  `NotFound` — the deletion genuinely completed, not just locally
+  believed to have. Whole delete-to-gone cycle took well under the ~6s
+  observation window.

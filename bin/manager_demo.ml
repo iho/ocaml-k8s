@@ -40,31 +40,37 @@ module Config_maps = Resource.Unstructured (struct
   let namespaced = true
 end)
 
-module Pod_controller = Controller.Make (Pods)
-module Config_map_controller = Controller.Make (Config_maps)
+module Pod_reconciler = struct
+  module R = Pods
 
-let pod_reconcile : Pods.t Reconciler.t =
- fun ctx cache req ->
-  (match Cache.get cache req with
-   | None -> Context.log ctx "POD        %s: deleted" (Request.to_string req)
-   | Some pod ->
-     let phase = Yojson.Safe.Util.(pod |> member "status" |> member "phase" |> to_string_option) in
-     Context.log ctx "POD        %s: phase=%s" (Request.to_string req)
-       (Option.value phase ~default:"?"));
-  Ok Reconciler.Result.Done
+  let reconcile (ctx : Context.t) (req : Request.t) (pod : Pods.t option) =
+    (match pod with
+     | None -> Context.log ctx "POD        %s: deleted" (Request.to_string req)
+     | Some pod ->
+       let phase = Yojson.Safe.Util.(pod |> member "status" |> member "phase" |> to_string_option) in
+       Context.log ctx "POD        %s: phase=%s" (Request.to_string req)
+         (Option.value phase ~default:"?"));
+    Ok (Reconcile_result.done_ ())
+end
 
-let config_map_reconcile : Config_maps.t Reconciler.t =
- fun ctx cache req ->
-  (match Cache.get cache req with
-   | None -> Context.log ctx "CONFIGMAP  %s: deleted" (Request.to_string req)
-   | Some cm ->
-     let n_keys =
-       match Yojson.Safe.Util.member "data" cm with
-       | `Assoc kvs -> List.length kvs
-       | _ -> 0
-     in
-     Context.log ctx "CONFIGMAP  %s: %d data key(s)" (Request.to_string req) n_keys);
-  Ok Reconciler.Result.Done
+module Config_map_reconciler = struct
+  module R = Config_maps
+
+  let reconcile (ctx : Context.t) (req : Request.t) (cm : Config_maps.t option) =
+    (match cm with
+     | None -> Context.log ctx "CONFIGMAP  %s: deleted" (Request.to_string req)
+     | Some cm ->
+       let n_keys =
+         match Yojson.Safe.Util.member "data" cm with
+         | `Assoc kvs -> List.length kvs
+         | _ -> 0
+       in
+       Context.log ctx "CONFIGMAP  %s: %d data key(s)" (Request.to_string req) n_keys);
+    Ok (Reconcile_result.done_ ())
+end
+
+module Pod_controller = Controller.Make (Pod_reconciler)
+module Config_map_controller = Controller.Make (Config_map_reconciler)
 
 let () =
   let namespace = if Array.length Sys.argv > 1 then Some Sys.argv.(1) else None in
@@ -84,12 +90,14 @@ let () =
     | Error e, _ | _, Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
     | Ok pod_ctx, Ok config_map_ctx ->
       let manager_ctx = pod_ctx in
+      (* Safe to reuse each controller's own ctx-client as its reflector
+         client too: neither reconciler calls [Context.client] itself. *)
       let pod_controller =
-        Pod_controller.create ~ctx:pod_ctx ~clock:env#clock ?namespace ~reconciler:pod_reconcile ()
+        Pod_controller.create ~ctx:pod_ctx ~client:(Context.client pod_ctx) ~clock:env#clock ?namespace ()
       in
       let config_map_controller =
-        Config_map_controller.create ~ctx:config_map_ctx ~clock:env#clock ?namespace
-          ~reconciler:config_map_reconcile ()
+        Config_map_controller.create ~ctx:config_map_ctx ~client:(Context.client config_map_ctx) ~clock:env#clock
+          ?namespace ()
       in
       let manager = Manager.create ~ctx:manager_ctx () in
       Manager.add_controller manager pod_controller;

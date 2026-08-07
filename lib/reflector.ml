@@ -1,6 +1,7 @@
 module Make (R : Resource.S) = struct
   type t =
     { ctx : Context.t
+    ; client : Client.t
     ; namespace : string option
     ; label_selector : string option
     ; field_selector : string option
@@ -8,8 +9,8 @@ module Make (R : Resource.S) = struct
     ; cache : R.t Cache.t
     }
 
-  let create ~ctx ?namespace ?label_selector ?field_selector ~on_event () =
-    { ctx; namespace; label_selector; field_selector; on_event; cache = Cache.create () }
+  let create ~ctx ~client ?namespace ?label_selector ?field_selector ~on_event () =
+    { ctx; client; namespace; label_selector; field_selector; on_event; cache = Cache.create () }
 
   let cache t = t.cache
 
@@ -32,7 +33,7 @@ module Make (R : Resource.S) = struct
     in
     let rec list_and_watch () =
       match
-        Client.list (Context.client t.ctx) ~resource:(module R) ?namespace:t.namespace
+        Client.list t.client ~resource:(module R) ?namespace:t.namespace
           ?label_selector:t.label_selector ?field_selector:t.field_selector ()
       with
       | Error e ->
@@ -77,7 +78,7 @@ module Make (R : Resource.S) = struct
         watch_from resource_version
     and watch_from resource_version =
       match
-        Client.watch (Context.client t.ctx) ~resource:(module R) ?namespace:t.namespace
+        Client.watch t.client ~resource:(module R) ?namespace:t.namespace
           ?label_selector:t.label_selector ?field_selector:t.field_selector ~resource_version
           ~on_event:on_watch_event ()
       with

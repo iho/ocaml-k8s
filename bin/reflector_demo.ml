@@ -45,7 +45,7 @@ let () =
         traceln "EVENT   %-8s %-40s resourceVersion=%s" kind_str (Request.to_string ev.request)
           (Option.value (Pods.resource_version ev.object_) ~default:"?")
       in
-      let reflector = Pod_reflector.create ~ctx ?namespace ~on_event () in
+      let reflector = Pod_reflector.create ~ctx ~client ?namespace ~on_event () in
       Fiber.fork ~sw (fun () -> Pod_reflector.run reflector);
       Cache.wait_for_sync (Pod_reflector.cache reflector);
       traceln "-- synced: %d pod(s) in cache --"

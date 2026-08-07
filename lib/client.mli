@@ -66,3 +66,21 @@ val watch :
     stream, [Error.Gone] is returned, or the enclosing [Switch] is
     cancelled — cancellation interrupts the underlying streaming HTTP read,
     same as the already-verified low-level watch. *)
+
+val update : t -> resource:(module Resource.S with type t = 'a) -> 'a -> (unit, Error.t) result
+(** PUTs [R.to_json obj] to [.../<plural>/<name>] — replaces the whole
+    object (metadata/spec/status, subject to the same
+    [metadata.resourceVersion] optimistic-concurrency check every
+    Kubernetes write uses: a stale [obj] gets a 409, surfaced as
+    [Error (Http ...)]). Used by {!Finalizer}; a reconciler wanting to
+    change its own [spec] would use this too, though nothing in this
+    library does yet. *)
+
+val update_status : t -> resource:(module Resource.S with type t = 'a) -> 'a -> (unit, Error.t) result
+(** PUTs [R.to_json obj] to [.../<plural>/<name>/status]. Per Kubernetes
+    convention the [/status] subresource endpoint reads and persists only
+    the body's ["status"] key, ignoring any ["spec"]/["metadata"] changes
+    in it — so sending the full object, as [to_json] does, is correct and
+    standard (it's what client-go's [UpdateStatus] does too). Untyped/JSON
+    at this layer, same as [list]/[watch]: the typed marshalling
+    ([R.with_status]) happens one layer up, in [Controller]. *)

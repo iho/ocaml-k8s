@@ -16,20 +16,23 @@ module Pods = Resource.Unstructured (struct
   let namespaced = true
 end)
 
-module Pod_controller = Controller.Make (Pods)
-
 let reconcile_count = ref 0
 
-let reconcile : Pods.t Reconciler.t =
- fun ctx cache req ->
-  incr reconcile_count;
-  (match Cache.get cache req with
-   | None -> Context.log ctx "RECONCILE #%d %s: deleted" !reconcile_count (Request.to_string req)
-   | Some pod ->
-     let phase = Yojson.Safe.Util.(pod |> member "status" |> member "phase" |> to_string_option) in
-     Context.log ctx "RECONCILE #%d %s: phase=%s" !reconcile_count (Request.to_string req)
-       (Option.value phase ~default:"?"));
-  Ok Reconciler.Result.Done
+module Pod_reconciler = struct
+  module R = Pods
+
+  let reconcile (ctx : Context.t) (req : Request.t) (pod : Pods.t option) =
+    incr reconcile_count;
+    (match pod with
+     | None -> Context.log ctx "RECONCILE #%d %s: deleted" !reconcile_count (Request.to_string req)
+     | Some pod ->
+       let phase = Yojson.Safe.Util.(pod |> member "status" |> member "phase" |> to_string_option) in
+       Context.log ctx "RECONCILE #%d %s: phase=%s" !reconcile_count (Request.to_string req)
+         (Option.value phase ~default:"?"));
+    Ok (Reconcile_result.done_ ())
+end
+
+module Pod_controller = Controller.Make (Pod_reconciler)
 
 let () =
   let namespace = if Array.length Sys.argv > 1 then Some Sys.argv.(1) else None in
@@ -47,9 +50,10 @@ let () =
     | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
     | Ok client ->
       let ctx = Context.create ~sw ~client ~clock:env#clock () in
-      let controller =
-        Pod_controller.create ~ctx ~clock:env#clock ?namespace ~workers:2 ~reconciler:reconcile ()
-      in
+      (* Safe to reuse the same [client] for both here: this reconciler
+         never calls [Context.client] itself (see Controller.Make's doc
+         comment on [~client] for when that would need to be separate). *)
+      let controller = Pod_controller.create ~ctx ~client ~clock:env#clock ?namespace ~workers:2 () in
       traceln "-- controller starting (2 workers) --";
       Controller.run ~sw controller
   with Exit -> traceln "stopped."
