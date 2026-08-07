@@ -1,12 +1,7 @@
 (** The List+Watch engine: [bin/main.ml]'s original [list_pods]/
     [watch_pods] generalised over any {!Resource.S} (done, via
     {!Client}) and turned into a long-running, self-healing loop instead
-    of a one-shot demo.
-
-    STUB — signature is final, [run] is not implemented yet
-    (roadmap Phase 2: populate the cache from LIST, stream WATCH events
-    into [on_event], and on {!Client.Error.Gone} or a dropped connection,
-    back off and re-LIST instead of stopping). *)
+    of a one-shot demo. *)
 module Make (R : Resource.S) : sig
   type t
 
@@ -25,8 +20,23 @@ module Make (R : Resource.S) : sig
 
   val cache : t -> R.t Cache.t
 
-  val run : sw:Eio.Switch.t -> t -> unit
-  (** Runs LIST-then-WATCH inline in the calling fiber, forever, until [sw]
-      is cancelled. Callers fork this onto a background fiber:
-      [Fiber.fork ~sw (fun () -> run ~sw t)]. *)
+  val run : t -> unit
+  (** Runs LIST-then-WATCH inline in the calling fiber, forever:
+      - LIST populates the cache (via [Cache.Writer.replace_all], so
+        objects that disappeared during a disconnection are actually
+        dropped, not left stale) and resolves [Cache.wait_for_sync].
+      - WATCH streams events from the LIST's [resourceVersion], updating
+        the cache and invoking [on_event] for each one.
+      - On {!Client.Error.Gone}, a dropped connection, or a LIST/WATCH
+        request error: back off (capped exponential, reset on success)
+        and re-LIST — a Reflector's job is to *stay* synced, not to give
+        up.
+
+      No [~sw] parameter: this never forks a sub-fiber, so — unlike
+      {!Controller.run}/{!Manager.run} — it needs no [Switch] of its own.
+      Cancellation flows through Eio's ambient per-fiber context instead;
+      callers make this a background loop with
+      [Fiber.fork ~sw (fun () -> run t)], and cancelling [sw] interrupts
+      whichever blocking call (LIST, WATCH, or the backoff sleep) is in
+      progress. *)
 end

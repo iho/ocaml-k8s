@@ -39,6 +39,19 @@ On Linux with `libssl-dev` installed system-wide this is usually unnecessary.
 dune build
 ```
 
+## Test
+
+```sh
+dune runtest
+```
+
+Currently covers `Workqueue` (`test/test_workqueue.ml`): dedup, redeliver-if-
+dirty-after-`done_`, `add_after` timing, `add_rate_limited` backoff
+increasing across calls, `shutdown` unblocking a waiting `get`, and —
+found by end-to-end testing, not this suite originally — cancelling a
+fiber while it's blocked in `get` not poisoning the queue's mutex (see
+"Notes / limitations"). Pure — no cluster or network needed.
+
 ## Run
 
 ### Against `kubectl proxy` (easiest way to test locally)
@@ -96,32 +109,81 @@ LIST+WATCH client. Current status per module:
 | `Gvk`, `Resource`, `Request`, `Watch_event` | done |
 | `Client` | done — LIST/WATCH generalised over any `Resource.S`, used by `bin/main.ml` |
 | `Context`, `Cache`, `Reconciler` | done |
-| `Reflector` | stub — signature final, `run` (List-then-Watch-forever with 410/backoff resync) not implemented |
-| `Workqueue` | stub — rate-limited/deduplicating queue, not implemented |
-| `Controller`, `Manager` | stub — wiring + graceful shutdown, not implemented |
+| `Reflector` | done — List-then-Watch-forever, full resync-as-sync-events on every (re)LIST (incl. on 410/dropped connection) with capped exponential backoff; see `bin/reflector_demo.ml` |
+| `Workqueue` | done — `Eio.Mutex`/`Eio.Condition`-backed dedup queue + per-item exponential backoff; see `test/test_workqueue.ml` |
+| `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.t`, N worker fibers; see `bin/controller_demo.ml` |
+| `Manager` | stub — multi-controller aggregation + graceful shutdown, not implemented |
 
 `bin/main.ml` doesn't use `Reflector`/`Controller`/`Manager` yet — it calls
 `Client.list`/`Client.watch` directly, same shape as the original hardcoded
 version, just parameterised by `Resource.Unstructured` for Pods instead of
-hand-written paths/JSON decoding.
+hand-written paths/JSON decoding. Two separate, minimal demo tools exercise
+the higher layers directly against a real cluster:
+
+```sh
+kubectl proxy --port=8001 &
+dune exec bin/reflector_demo.exe -- kube-system   # Reflector + Cache only
+dune exec bin/controller_demo.exe -- kube-system  # full Reflector->Workqueue->Reconciler loop
+```
 
 ## Notes / limitations
 
-- On `410 Gone` (the watch's `resourceVersion` fell out of etcd's compaction
-  window), `Client.watch` returns `Error (Gone ...)` and the program logs it
-  and stops, rather than automatically re-LISTing and restarting the watch
-  — that resync behavior belongs in `Reflector` (see roadmap above), not in
-  `Client` itself.
-- No automatic reconnect/retry on transient network errors.
-- No informer-style local cache/indexer wired up yet in `bin/main.ml` — it
-  only prints events. (`Cache` exists in the library but nothing populates
-  it until `Reflector` is implemented.)
+- `bin/main.ml` itself still doesn't re-LIST on `410 Gone` — it calls
+  `Client.list`/`Client.watch` directly and just logs+stops, same as
+  before. `Reflector` (used by `bin/reflector_demo.ml`, not yet by
+  `main.ml`) does implement the resync: any `Client.watch` error, 410 or
+  otherwise, triggers a re-LIST with capped exponential backoff (reset on
+  success), and re-LISTs replace the cache's contents wholesale so objects
+  deleted during a disconnection are actually dropped, not left stale.
+- No global rate limiting or jitter on the Reflector's own reconnect
+  backoff (just per-attempt capped exponential) — fine at the scale this
+  is built for, would want jitter across many controllers hitting the same
+  API server simultaneously.
+- `Controller`'s worker loop does *not* catch exceptions raised by the
+  reconciler — only `Error` results are handled (requeue+backoff).
+  An uncaught exception is treated as a real bug and allowed to propagate
+  (failing that controller's whole switch), deliberately, rather than
+  being silently converted into an endless requeue loop.
+- **Bug found via end-to-end testing, now fixed**: cancelling a fiber
+  blocked in `Workqueue.get` — e.g. Ctrl-C arriving while a controller's
+  worker fiber is idle, waiting for work — used to raise
+  `Eio.Mutex.Poisoned` and crash, because `Eio.Mutex.use_rw` disables its
+  mutex on *any* exception escaping the callback, even `~protect:false`,
+  even one from a cancelled `Condition.await` that left the table
+  perfectly consistent. `get` now uses `Eio.Mutex.use_ro`, which only
+  unlocks (never poisons) on exception — correct here since `get`'s writes
+  are unreachable except after `await` has already returned normally. This
+  was invisible to the original unit tests (which only exercised the
+  non-exceptional `shutdown`-broadcasts-`get` wake path) and only surfaced
+  once `bin/controller_demo.ml` was Ctrl-C'd against a real cluster; a
+  regression test (`test_cancel_while_blocked_in_get_does_not_poison`) was
+  added and confirmed to fail against the old code before the fix.
 
 ## Manual verification
 
-This was tested end-to-end against a real cluster (`kind`) via
-`kubectl proxy`: LIST correctly enumerated existing pods and printed the
-list's `resourceVersion`, and WATCH correctly streamed `ADDED`, `MODIFIED`,
-and `DELETED` events in real time while a test pod was created and deleted.
-Ctrl-C during an active watch was confirmed to cleanly cancel the fiber,
-close the connection, and exit with status 0.
+Tested end-to-end against a real cluster (`kind`) via `kubectl proxy`
+multiple times as the library grew:
+
+- **`Client`**: LIST correctly enumerated existing pods and printed the
+  list's `resourceVersion`; WATCH streamed `ADDED`, `MODIFIED`, `DELETED`
+  in real time while a test pod was created/deleted; Ctrl-C during an
+  active watch cleanly cancelled the fiber, closed the connection
+  (auto-registered via `Switch.on_release`), and exited with status 0.
+- **`Reflector`**: same create/delete-pod scenario through
+  `bin/reflector_demo.ml` — initial LIST correctly populated the cache and
+  unblocked `Cache.wait_for_sync`, watch events updated the cache and fired
+  `on_event` with the same ADDED/MODIFIED/DELETED sequence, and Ctrl-C
+  cancelled cleanly the same way. (A live 410 was attempted by watching
+  from `resourceVersion=1` on a fresh cluster but didn't reproduce — the
+  API server's watch cache still served it; the 410 branch itself is a
+  one-line status-code check reviewed rather than fault-injection-tested.)
+- **`Workqueue`**: no cluster needed — `dune runtest` (see "Test" above).
+- **`Controller`**: `bin/controller_demo.ml` (2 workers) against a real
+  cluster — the first run surfaced a real gap (pre-existing pods were
+  never reconciled at startup, only pods that changed after the initial
+  LIST), which led to the resync-as-sync-events fix in `Reflector`
+  described above; re-running afterward showed all 8 pre-existing
+  `kube-system` pods reconciled at startup followed by the test pod's full
+  create/modify/delete lifecycle. Ctrl-C testing during this same run also
+  surfaced the `Workqueue.get` mutex-poisoning bug described above; fixed,
+  and re-verified clean (exit 0) across several repeated Ctrl-C runs.

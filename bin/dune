@@ -1,3 +1,11 @@
 (executable
  (name main)
  (libraries eio eio_main piaf uri yojson k8s))
+
+(executable
+ (name reflector_demo)
+ (libraries eio eio_main piaf uri yojson k8s))
+
+(executable
+ (name controller_demo)
+ (libraries eio eio_main piaf uri yojson k8s))

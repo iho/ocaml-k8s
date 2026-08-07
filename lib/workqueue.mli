@@ -5,10 +5,9 @@
     roadmap). Monomorphic on {!Request.t}: there is only ever one key type
     in this design, so a functor here would be pure ceremony.
 
-    STUB — signature is final, bodies are not implemented yet (roadmap
-    Phase 3, pure/no network — implement with [Eio.Mutex] + [Eio.Condition]
-    for [get], and [Eio.Time.sleep] fibers forked onto [sw] for
-    [add_after]/[add_rate_limited]'s backoff). *)
+    Implemented with [Eio.Mutex] + [Eio.Condition] guarding a queue/dirty-
+    set/processing-set, and one short-lived [Eio.Time.sleep] fiber forked
+    onto [sw] per [add_after]/[add_rate_limited] call. *)
 
 type t
 

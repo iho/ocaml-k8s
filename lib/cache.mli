@@ -20,4 +20,11 @@ module Writer : sig
   val set : 'a t -> Request.t -> 'a -> unit
   val remove : 'a t -> Request.t -> unit
   val mark_synced : 'a t -> unit
+
+  val replace_all : 'a t -> (Request.t * 'a) list -> unit
+  (** Atomically replaces the entire contents with exactly [items] and
+      marks the cache synced. Used after every successful LIST (including
+      re-LISTs after a reconnect or 410 Gone) so objects deleted during a
+      disconnection are actually removed, not left stale forever — a plain
+      [set] per item would never notice an object dropped out of the list. *)
 end

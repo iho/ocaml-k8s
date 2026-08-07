@@ -29,4 +29,13 @@ module Writer = struct
       then (
         t.is_synced <- true;
         Eio.Promise.resolve t.resolve_synced ()))
+
+  let replace_all t items =
+    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
+      Hashtbl.reset t.table;
+      List.iter (fun (k, v) -> Hashtbl.replace t.table k v) items;
+      if not t.is_synced
+      then (
+        t.is_synced <- true;
+        Eio.Promise.resolve t.resolve_synced ()))
 end
