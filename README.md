@@ -5,7 +5,11 @@ the returned `resourceVersion`, printing every `ADDED`/`MODIFIED`/`DELETED`
 event. Direct-style throughout (no Lwt/Async, no monadic binds) using
 [Piaf](https://github.com/anmonteiro/piaf) for HTTP/1.1 + HTTP/2 + TLS.
 
-All the logic lives in `bin/main.ml`.
+`bin/main.ml` is now a thin CLI wrapper around the `k8s` library in `lib/`,
+which is the start of a higher-level operator framework (Informer/Reflector,
+Workqueue, Controller, Manager — see "Library layout & roadmap" below).
+`lib/client.ml` implements LIST+WATCH generically for any `Resource.S`, not
+just Pods.
 
 ## Prerequisites
 
@@ -82,15 +86,36 @@ cancellation interrupts the watch fiber's in-progress streaming read and
 runs the registered cleanup hook that shuts down the HTTP connection, so the
 process always exits without leaking sockets.
 
+## Library layout & roadmap
+
+`lib/` is an operator framework being built bottom-up on top of the verified
+LIST+WATCH client. Current status per module:
+
+| Module | Status |
+|---|---|
+| `Gvk`, `Resource`, `Request`, `Watch_event` | done |
+| `Client` | done — LIST/WATCH generalised over any `Resource.S`, used by `bin/main.ml` |
+| `Context`, `Cache`, `Reconciler` | done |
+| `Reflector` | stub — signature final, `run` (List-then-Watch-forever with 410/backoff resync) not implemented |
+| `Workqueue` | stub — rate-limited/deduplicating queue, not implemented |
+| `Controller`, `Manager` | stub — wiring + graceful shutdown, not implemented |
+
+`bin/main.ml` doesn't use `Reflector`/`Controller`/`Manager` yet — it calls
+`Client.list`/`Client.watch` directly, same shape as the original hardcoded
+version, just parameterised by `Resource.Unstructured` for Pods instead of
+hand-written paths/JSON decoding.
+
 ## Notes / limitations
 
-This is intentionally minimal, not a full operator framework:
-
 - On `410 Gone` (the watch's `resourceVersion` fell out of etcd's compaction
-  window), the program logs it and stops rather than automatically
-  re-LISTing and restarting the watch.
+  window), `Client.watch` returns `Error (Gone ...)` and the program logs it
+  and stops, rather than automatically re-LISTing and restarting the watch
+  — that resync behavior belongs in `Reflector` (see roadmap above), not in
+  `Client` itself.
 - No automatic reconnect/retry on transient network errors.
-- No informer-style local cache/indexer — this only prints events.
+- No informer-style local cache/indexer wired up yet in `bin/main.ml` — it
+  only prints events. (`Cache` exists in the library but nothing populates
+  it until `Reflector` is implemented.)
 
 ## Manual verification
 
