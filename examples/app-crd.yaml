@@ -27,6 +27,14 @@ spec:
               properties:
                 image:
                   type: string
+                replicas:
+                  # Optional, and unused by bin/owned_child_demo.ml's App
+                  # (whose reconciler never reads it) -- present purely so
+                  # bin/webhook_demo.ml's validating webhook has a field
+                  # to reject on; without it here, the API server's own
+                  # strict structural-schema check would reject an
+                  # out-of-range value before admission ever ran.
+                  type: integer
               required: [image]
           required: [spec]
       additionalPrinterColumns:

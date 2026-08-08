@@ -10,6 +10,7 @@ depends: [
   "piaf"
   "uri"
   "yojson"
+  "base64"
   "odoc" {with-doc}
 ]
 build: [

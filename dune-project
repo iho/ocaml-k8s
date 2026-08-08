@@ -12,4 +12,5 @@
   eio_main
   piaf
   uri
-  yojson))
+  yojson
+  base64))

@@ -9,3 +9,7 @@
 (test
  (name test_metrics_prometheus)
  (libraries eio eio_main k8s))
+
+(test
+ (name test_admission)
+ (libraries k8s base64))

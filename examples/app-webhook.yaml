@@ -1,0 +1,52 @@
+# Registers bin/webhook_demo.ml's two webhooks against the App CRD
+# (examples/app-crd.yaml). Requires envsubst (or manual substitution) for
+# ${CA_BUNDLE} -- see "Admission webhooks" in the README for the full
+# setup, including why clientConfig.url (not .service) is what's needed
+# to reach a process running on the host rather than inside the cluster.
+#
+#   export CA_BUNDLE=$(base64 < /tmp/webhook-certs/webhook-cert.pem | tr -d '\n')
+#   envsubst < examples/app-webhook.yaml | kubectl apply -f -
+#
+# Deliberately scoped as narrowly as possible (apiGroups/apiVersions/
+# resources naming only apps.example.com's App, nothing broader) and
+# failurePolicy: Ignore, so a mistake in this file or in webhook_demo.ml
+# itself can't block unrelated cluster traffic (core Pods, etc.) --
+# failurePolicy: Fail is the real-world default you'd actually want once
+# you trust the webhook, not for first-time local testing.
+apiVersion: admissionregistration.k8s.io/v1
+kind: MutatingWebhookConfiguration
+metadata:
+  name: app-mutating-demo
+webhooks:
+  - name: mutate-app.example.com
+    clientConfig:
+      url: https://host.docker.internal:8443/mutate
+      caBundle: ${CA_BUNDLE}
+    rules:
+      - apiGroups: ["example.com"]
+        apiVersions: ["v1"]
+        resources: ["apps"]
+        operations: ["CREATE", "UPDATE"]
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 5
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingWebhookConfiguration
+metadata:
+  name: app-validating-demo
+webhooks:
+  - name: validate-app.example.com
+    clientConfig:
+      url: https://host.docker.internal:8444/validate
+      caBundle: ${CA_BUNDLE}
+    rules:
+      - apiGroups: ["example.com"]
+        apiVersions: ["v1"]
+        resources: ["apps"]
+        operations: ["CREATE", "UPDATE"]
+    admissionReviewVersions: ["v1"]
+    sideEffects: None
+    failurePolicy: Ignore
+    timeoutSeconds: 5

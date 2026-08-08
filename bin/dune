@@ -41,3 +41,7 @@
 (executable
  (name metrics_demo)
  (libraries eio eio_main piaf uri yojson k8s))
+
+(executable
+ (name webhook_demo)
+ (libraries eio eio_main piaf uri yojson k8s))
