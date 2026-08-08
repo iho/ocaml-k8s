@@ -135,27 +135,29 @@ LIST+WATCH client. Current status per module:
 | `Type_meta`, `List_meta`, `Status` | done — `apiVersion`/`kind` read without knowing the Kind, a LIST response's own metadata, and Kubernetes' generic `meta/v1.Status` error-body type, respectively |
 | `Resource` | done — `Resource.S` includes a `status` subresource type (`status_of_json`/`status_to_json`/`status`/`with_status`); `Resource.Unstructured` and typed CRD bindings (hand-written, e.g. `bin/webapp_demo.ml`'s `Web_app`, or generated — see below) all implement it |
 | `Client` | done — LIST/WATCH/`get`/`create_object`/`update`/`update_status` generalised over any `Resource.S`; non-2xx responses are parsed into `Error.Api_error of Status.t` when the body is a Status object (essentially always), not just a formatted string; `Client.clone` opens an independent connection reusing an existing client's auth/TLS settings, so `Reflector`/`Controller` can each get their own dedicated connection without the caller doing anything |
-| `Context`, `Cache` | done |
+| `Context`, `Cache` | done — `Context.Metrics.t` is a real, pluggable interface (`inc_counter`/`set_gauge`/`observe`), no-op by default; `Controller` calls it unconditionally (see below), so plugging in a real backend instruments every controller with zero reconciler-side code |
+| `Metrics_prometheus` | done — an in-process Prometheus registry implementing `Context.Metrics.t` for real, plus a `/metrics` HTTP endpoint (`Piaf.Server`, plain HTTP); see "Metrics" below |
 | `Reflector` | done — List-then-Watch-forever, full resync-as-sync-events on every (re)LIST (incl. on 410/dropped connection) with capped exponential backoff; opens its own connection via `Client.clone` rather than taking a caller-supplied `~client`, so it can never accidentally share a connection with anything else; see `bin/reflector_demo.ml` |
 | `Workqueue` | done — `Eio.Mutex`/`Eio.Condition`-backed dedup queue + per-item exponential backoff; see `test/test_workqueue.ml` |
 | `Reconcile_result`, `Reconcile_error`, `Reconciler` | done — `Reconciler.S` bundles a `Resource.S` (`module R`) with a `reconcile : Context.t -> Request.t -> R.t option -> (R.status Reconcile_result.t, Reconcile_error.t) result`, so `Controller.Make` takes one functor argument. `Reconcile_error.of_client_error` maps a `Client.Error.t` to `Conflict` iff it's a real 409 (via `Status.is_conflict`), making that case reachable for the first time instead of dead code. `Reconcile_result.requeue_after` reconciles again on a timer independent of watch events — see `bin/periodic_demo.ml`. A reconciler is pure enough to unit-test directly, no cluster needed — see `test/test_reconciler.ml` |
-| `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.S`, N worker fibers, status-subresource PUTs; see `bin/hello_operator.ml` (the minimal quickstart), `bin/controller_demo.ml` (untyped/`Unstructured`, multiple workers), and `bin/webapp_demo.ml` (typed CRD, real status update) |
+| `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.S`, N worker fibers, status-subresource PUTs; see `bin/hello_operator.ml` (the minimal quickstart), `bin/controller_demo.ml` (untyped/`Unstructured`, multiple workers), and `bin/webapp_demo.ml` (typed CRD, real status update). Always emits `k8s_controller_reconcile_total` (counter, labelled `kind`/`group_version`/`result`), `k8s_controller_reconcile_duration_seconds` (histogram, same labels minus `result`), and `k8s_controller_workqueue_depth` (gauge, polled every 5s) through `Context.metrics` — see `bin/metrics_demo.ml` |
 | `Manager` | done — multi-controller aggregation, centralised SIGINT/SIGTERM handling, `with_leader_election`; see `bin/manager_demo.ml` and `bin/leader_demo.ml` |
 | `Finalizer` | done — `has`/`add`/`remove`, JSON-level (no `with_finalizers` needed on `Resource.S`); see `bin/webapp_demo.ml`. `Owner_reference` is the other half of cleanup — a child object GC'd by Kubernetes itself needs no finalizer at all; see `bin/owned_child_demo.ml` |
 | `Lease`, `Leader_election` | done — typed `coordination.k8s.io/v1` Lease binding + an acquire/steal/renew loop (patient acquire, hard-deadline renew, fails the switch via `Leadership_lost` if renewal can't keep up); see `bin/leader_demo.ml` |
 | `gen/gen_resource.ml` | done — a small, selective CRD-YAML-to-`Resource.S` generator (see "Generating typed CRD bindings" below); `generated/web_app.ml` (built by a dune rule from `examples/webapp-crd.yaml`) and `bin/webapp_gen_demo.ml` prove it's a drop-in replacement for the hand-written `Web_app` |
 | `gen/scaffold_operator.ml` | done — a kubebuilder-init-style generator that writes a whole new, standalone operator project (`dune-project`/`bin/`/`deploy/*.yaml`), not a module to embed in this one (see "Scaffolding a new operator" below) |
 
-This completes the roadmap's core bottom-up build-out plus the finalizer
-and leader-election extension points (`Phase 6` health/readiness checks
-remain future work — stub signatures in `lib/manager.mli`). `bin/main.ml`
-still doesn't use `Reflector`/`Controller`/`Manager` — it calls
-`Client.list`/`Client.watch` directly, same shape as the original
-hardcoded version, just parameterised by `Resource.Unstructured` for Pods
-instead of hand-written paths/JSON decoding. Ten separate, minimal demo
-tools exercise the higher layers directly against a real cluster —
-`bin/hello_operator.ml` first, if you just want the smallest complete
-example to start reading from:
+This completes the roadmap's core bottom-up build-out plus the finalizer,
+leader-election, and metrics extension points (`Phase 6` health/readiness
+*checks* specifically remain future work — stub signatures in
+`lib/manager.mli` — metrics is the other half of that phase, and it's
+done). `bin/main.ml` still doesn't use `Reflector`/`Controller`/`Manager`
+— it calls `Client.list`/`Client.watch` directly, same shape as the
+original hardcoded version, just parameterised by `Resource.Unstructured`
+for Pods instead of hand-written paths/JSON decoding. Eleven separate,
+minimal demo tools exercise the higher layers directly against a real
+cluster — `bin/hello_operator.ml` first, if you just want the smallest
+complete example to start reading from:
 
 ```sh
 kubectl proxy --port=8001 &
@@ -164,6 +166,7 @@ dune exec bin/reflector_demo.exe -- kube-system   # Reflector + Cache only
 dune exec bin/controller_demo.exe -- kube-system  # full Reflector->Workqueue->Reconciler loop, untyped (Unstructured)
 dune exec bin/manager_demo.exe -- kube-system     # two controllers (Pods + ConfigMaps) under one Manager
 dune exec bin/periodic_demo.exe -- kube-system    # Requeue_after: reconciling on a timer, not just on watch events
+dune exec bin/metrics_demo.exe -- kube-system     # real Prometheus /metrics, curl http://127.0.0.1:9090/metrics
 
 # typed CRD example, with a real /status subresource update and finalizer
 # (hand-written Web_app -- bin/webapp_gen_demo.exe below is the same thing
@@ -316,6 +319,60 @@ same `Client.of_env`/`Context.create`/`Controller.create` wiring the
 hand-written demos use, failing cleanly with a connection-refused error
 since no `kubectl proxy` was running for that check, not a compile or
 link error.
+
+## Metrics
+
+`Context.Metrics.t` is a real interface — `inc_counter`/`set_gauge`/
+`observe` — that `Controller` calls unconditionally on every reconcile
+(see the roadmap table above for exactly what). By default `Context.create`
+uses `Context.Metrics.noop`, so none of that costs anything unless you ask
+for it; plug in `Metrics_prometheus` instead and every controller sharing
+that `Context.t` is instrumented, with no reconciler-side code at all:
+
+```ocaml
+let registry = Metrics_prometheus.create () in
+Metrics_prometheus.serve ~sw env registry ~port:9090;  (* GET /metrics *)
+let ctx = Context.create ~sw ~client ~clock:env#clock
+            ~metrics:(Metrics_prometheus.context_metrics registry) () in
+```
+
+See `bin/metrics_demo.ml` for the full example. `Metrics_prometheus` is a
+self-contained in-process registry (counters/gauges/histograms in a plain
+`Hashtbl`, guarded by an `Eio.Mutex`) rendering the standard Prometheus
+text exposition format — no external dependency beyond `Piaf.Server`
+(already used for the HTTP client side, so no new library dependency
+either). Histogram buckets are a single fixed default set (5ms – 10s,
+the Prometheus client libraries' own convention), not configurable per
+metric name — deliberately: nothing here needs that yet, and a
+bucket-configuration API would be pure speculation. Multiple controllers
+(e.g. under one `Manager`) sharing one registry end up on a single
+`/metrics` endpoint, distinguished by the `kind`/`group_version` labels
+`Controller` attaches automatically.
+
+`Metrics_prometheus.serve` is plain HTTP, no TLS — meant to be scraped
+from inside the cluster network, the same trust boundary as kubelet's own
+`/metrics`, not exposed externally. `Manager.add_health_check`/
+`add_readiness_check` remain unimplemented stubs (see "Notes /
+limitations" below) — a real `/healthz`/`/readyz` endpoint would want the
+same `Piaf.Server` plumbing `Metrics_prometheus.serve` already
+demonstrates, just answering liveness/readiness instead of metrics.
+
+Verified for real: `bin/metrics_demo.ml` against a real cluster —
+`curl http://127.0.0.1:9090/metrics` showed `k8s_controller_reconcile_total`
+incrementing correctly (7 pre-existing ConfigMaps at startup, confirmed
+it read 8 after `kubectl create configmap` triggered one more real watch
+event), `k8s_controller_workqueue_depth` reading 7 immediately after
+startup (the gauge's first sample, taken before the initial backlog
+drained) then 0 on its next 5-second poll once the queue was empty, and
+a real histogram with correctly cumulative bucket counts and a nonzero
+`_sum`. Also confirmed `GET /nope` returns 404 rather than crashing the
+server, and clean SIGINT shutdown (exit code 0) with the metrics server
+still running at the time. `test/test_metrics_prometheus.ml` covers the
+registry/rendering logic itself without a cluster: counters accumulate,
+gauges hold the last value (not a sum), histogram buckets are correctly
+cumulative, label order doesn't create duplicate series, and label
+values containing a literal quote or backslash render as valid
+Prometheus text instead of corrupting the output.
 
 ## Notes / limitations
 

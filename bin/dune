@@ -37,3 +37,7 @@
 (executable
  (name owned_child_demo)
  (libraries eio eio_main piaf uri yojson k8s))
+
+(executable
+ (name metrics_demo)
+ (libraries eio eio_main piaf uri yojson k8s))

@@ -5,3 +5,7 @@
 (test
  (name test_reconciler)
  (libraries eio eio_main k8s unix threads.posix))
+
+(test
+ (name test_metrics_prometheus)
+ (libraries eio eio_main k8s))

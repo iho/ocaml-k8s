@@ -10,6 +10,13 @@ let run ~sw (t : t) = t.start ~sw
 module Make (Rec : Reconciler.S) = struct
   module Rf = Reflector.Make (Rec.R)
 
+  (* Every metric this controller emits carries these two labels, so a
+     Manager combining several controllers on one Context.Metrics.t (e.g.
+     via Metrics_prometheus.context_metrics) ends up with one distinguished
+     time series per Kind on a single /metrics endpoint, not one
+     unlabelled blob mixing every controller's numbers together. *)
+  let metric_labels = [ "kind", Rec.R.gvk.kind; "group_version", Gvk.api_version Rec.R.gvk ]
+
   let create ~ctx ~env ~clock ?namespace ?label_selector ?(workers = 1) () : t =
     let start ~sw =
       let wq = Workqueue.create ~sw ~clock () in
@@ -18,6 +25,21 @@ module Make (Rec : Reconciler.S) = struct
       Eio.Fiber.fork ~sw (fun () -> Rf.run ~sw reflector);
       Cache.wait_for_sync (Rf.cache reflector);
       let cache = Rf.cache reflector in
+      let metrics = Context.metrics ctx in
+      Eio.Fiber.fork ~sw (fun () ->
+        (* A queue depth gauge has no natural "event" to hang off of the
+           way the counter/histogram below do (nothing changes it except
+           Workqueue operations happening on other fibers) -- polling on a
+           timer is the simplest thing that's actually correct, and cheap
+           enough at this interval that it's not worth threading a metrics
+           callback through every Workqueue.add/done_ call instead. *)
+        let rec loop () =
+          Context.Metrics.set_gauge metrics ~name:"k8s_controller_workqueue_depth" ~labels:metric_labels
+            (float_of_int (Workqueue.len wq));
+          Context.sleep ctx 5.0;
+          loop ()
+        in
+        loop ());
       (* Applies a status update, if any, *before* the reconcile's
          requested action. Returns [false] if the update was requested but
          failed, so the caller can override [action] with a backoff
@@ -57,16 +79,30 @@ module Make (Rec : Reconciler.S) = struct
                to propagate — through [Fiber.fork] that fails this
                controller's switch — rather than being silently
                swallowed into a requeue loop. *)
+            let started_at = Eio.Time.now clock in
+            let record_reconcile ~outcome =
+              let duration = Eio.Time.now clock -. started_at in
+              Context.Metrics.inc_counter metrics ~name:"k8s_controller_reconcile_total"
+                ~labels:(("result", outcome) :: metric_labels);
+              Context.Metrics.observe metrics ~name:"k8s_controller_reconcile_duration_seconds" ~labels:metric_labels
+                duration
+            in
             (match Rec.reconcile ctx req (Cache.get cache req) with
              | Ok result ->
                let action = if apply_status req result then result.action else Reconcile_result.Requeue in
                (match action with
-                | Reconcile_result.Done -> Workqueue.forget wq req
-                | Requeue -> Workqueue.add_rate_limited wq req
+                | Reconcile_result.Done ->
+                  record_reconcile ~outcome:"done";
+                  Workqueue.forget wq req
+                | Requeue ->
+                  record_reconcile ~outcome:"requeue";
+                  Workqueue.add_rate_limited wq req
                 | Requeue_after delay ->
+                  record_reconcile ~outcome:"requeue_after";
                   Workqueue.forget wq req;
                   Workqueue.add_after wq req ~delay)
              | Error e ->
+               record_reconcile ~outcome:"error";
                Context.log ctx "reconcile %s failed: %s" (Request.to_string req) (Reconcile_error.to_string e);
                Workqueue.add_rate_limited wq req);
             Workqueue.done_ wq req;

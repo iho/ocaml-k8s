@@ -1,13 +1,19 @@
 module Metrics = struct
   type t =
     { inc_counter : name:string -> labels:(string * string) list -> unit
+    ; set_gauge : name:string -> labels:(string * string) list -> float -> unit
     ; observe : name:string -> labels:(string * string) list -> float -> unit
     }
 
   let noop =
-    { inc_counter = (fun ~name:_ ~labels:_ -> ()); observe = (fun ~name:_ ~labels:_ _ -> ()) }
+    { inc_counter = (fun ~name:_ ~labels:_ -> ())
+    ; set_gauge = (fun ~name:_ ~labels:_ _ -> ())
+    ; observe = (fun ~name:_ ~labels:_ _ -> ())
+    }
 
+  let create ~inc_counter ~set_gauge ~observe = { inc_counter; set_gauge; observe }
   let inc_counter t = t.inc_counter
+  let set_gauge t = t.set_gauge
   let observe t = t.observe
 end
 

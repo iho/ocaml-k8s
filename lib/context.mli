@@ -5,14 +5,38 @@
     fibers onto the controller's switch. *)
 type t
 
-(** Stub for now — a no-op implementation is the default. A future
-    Prometheus backend just implements this. *)
+(** A no-op implementation is the default; {!Metrics_prometheus} is a real
+    in-process backend implementing this. [Controller] calls [inc_counter]/
+    [observe]/[set_gauge] itself (reconcile count/duration, workqueue
+    depth — see its doc comment for the exact names/labels), so plugging in
+    a real backend instruments every controller automatically, with no
+    per-reconciler code needed. *)
 module Metrics : sig
   type t
 
   val noop : t
+
+  val create :
+     inc_counter:(name:string -> labels:(string * string) list -> unit)
+    -> set_gauge:(name:string -> labels:(string * string) list -> float -> unit)
+    -> observe:(name:string -> labels:(string * string) list -> float -> unit)
+    -> t
+  (** Builds a [t] from a real backend's three operations — what
+      {!Metrics_prometheus.context_metrics} uses. *)
+
   val inc_counter : t -> name:string -> labels:(string * string) list -> unit
+  (** Increments a counter by 1 — Prometheus counters only ever go up, so
+      there's no arbitrary-delta variant: callers wanting "+N" call this N
+      times, same as every other Prometheus client library's convention. *)
+
+  val set_gauge : t -> name:string -> labels:(string * string) list -> float -> unit
+  (** Sets a gauge to an absolute value (unlike {!inc_counter}, which is
+      always relative) — for a quantity that goes up and down, like queue
+      depth, not a running total. *)
+
   val observe : t -> name:string -> labels:(string * string) list -> float -> unit
+  (** Records one sample into a histogram/summary — e.g. one reconcile's
+      duration in seconds. *)
 end
 
 val create :
