@@ -28,12 +28,14 @@ module Make (Rec : Reconciler.S) = struct
      unlabelled blob mixing every controller's numbers together. *)
   let metric_labels = [ "kind", Rec.R.gvk.kind; "group_version", Gvk.api_version Rec.R.gvk ]
 
-  let create ~ctx ~env ~clock ?namespace ?label_selector ?owns ?(workers = 1) () : t =
+  let create ~ctx ?namespace ?label_selector ?owns ?(workers = 1) ?(base_delay = 0.005) ?(max_delay = 1000.0)
+    ?max_retries () : t =
+    let clock = (Context.env ctx)#clock in
     let cache_ref : Rec.R.t Cache.t option ref = ref None in
     let start ~sw =
-      let wq = Workqueue.create ~sw ~clock () in
+      let wq = Workqueue.create ~sw ~clock ~base_delay ~max_delay () in
       let on_event (ev : Rec.R.t Watch_event.t) = Workqueue.add wq ev.request in
-      let reflector = Rf.create ~ctx ~env ?namespace ?label_selector ~on_event () in
+      let reflector = Rf.create ~ctx ?namespace ?label_selector ~on_event () in
       Eio.Fiber.fork ~sw (fun () -> Rf.run ~sw reflector);
       let cache = Rf.cache reflector in
       cache_ref := Some cache;
@@ -55,7 +57,7 @@ module Make (Rec : Reconciler.S) = struct
                | Some req -> Workqueue.add wq req
              in
              let module Srf = Reflector.Make (S.R) in
-             let rf = Srf.create ~ctx ~env ?namespace ?label_selector ~on_event:on_secondary () in
+             let rf = Srf.create ~ctx ?namespace ?label_selector ~on_event:on_secondary () in
              Eio.Fiber.fork ~sw (fun () -> Srf.run ~sw rf))
            secondaries);
       let metrics = Context.metrics ctx in
@@ -190,7 +192,11 @@ module Make (Rec : Reconciler.S) = struct
              | Error e ->
                record_reconcile ~outcome:"error";
                Context.log ctx "reconcile %s failed: %s" (Request.to_string req) (Reconcile_error.to_string e);
-               Workqueue.add_rate_limited wq req);
+               (match max_retries with
+                | Some max_retries when Workqueue.failure_count wq req >= max_retries ->
+                  Context.log ctx "%s: giving up after %d failed attempt(s)" (Request.to_string req) max_retries;
+                  Workqueue.forget wq req
+                | _ -> Workqueue.add_rate_limited wq req));
             Workqueue.done_ wq req;
             loop ()
         in

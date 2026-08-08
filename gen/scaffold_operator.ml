@@ -267,8 +267,8 @@ let typed_main_ml ~group ~version ~kind ~plural ~namespaced =
     \    match Client.of_env ~sw env with\n\
     \    | Error e -> traceln \"failed to connect: %%s\" (Client.Error.to_string e)\n\
     \    | Ok client ->\n\
-    \      let ctx = Context.create ~sw ~client ~clock:env#clock () in\n\
-    \      let controller = %s.create ~ctx ~env ~clock:env#clock ?namespace () in\n\
+    \      let ctx = Context.create ~sw ~env ~client () in\n\
+    \      let controller = %s.create ~ctx ?namespace () in\n\
     \      traceln \"-- %s controller starting --\";\n\
     \      Controller.run ~sw controller\n\
     \  with Exit -> traceln \"stopped.\"\n"
@@ -321,8 +321,8 @@ let unstructured_main_ml ~version ~kind ~plural ~namespaced =
     \    match Client.of_env ~sw env with\n\
     \    | Error e -> traceln \"failed to connect: %%s\" (Client.Error.to_string e)\n\
     \    | Ok client ->\n\
-    \      let ctx = Context.create ~sw ~client ~clock:env#clock () in\n\
-    \      let controller = %s.create ~ctx ~env ~clock:env#clock ?namespace () in\n\
+    \      let ctx = Context.create ~sw ~env ~client () in\n\
+    \      let controller = %s.create ~ctx ?namespace () in\n\
     \      traceln \"-- %s controller starting --\";\n\
     \      Controller.run ~sw controller\n\
     \  with Exit -> traceln \"stopped.\"\n"

@@ -29,21 +29,33 @@ val is_synced : t -> bool
 module Make (Rec : Reconciler.S) : sig
   val create :
      ctx:Context.t
-    -> env:Eio_unix.Stdenv.base
-    -> clock:_ Eio.Time.clock
     -> ?namespace:string
     -> ?label_selector:string
     -> ?owns:(module Secondary.S) list
     -> ?workers:int (** default 1 *)
+    -> ?base_delay:float (** default 0.005s — first rate-limited retry after a reconcile error; forwarded to {!Workqueue.create} *)
+    -> ?max_delay:float (** default 1000.0s — backoff cap; forwarded to {!Workqueue.create} *)
+    -> ?max_retries:int
+         (** default [None] (unlimited, client-go's behaviour): once a key has
+             been rate-limited this many times by consecutive [Error] results
+             from [Rec.reconcile] — a [Requeue] returned via [Ok] doesn't
+             count, that's the reconciler's own deliberate "not ready yet",
+             not a failure — it is [forget]'d instead of requeued again, and
+             the failure is logged. A later watch event (the object actually
+             changing) re-adds it with a fresh count. Without this, a
+             permanently-broken object (e.g. one that fails validation no
+             retry can fix) retries forever, capped only at [max_delay]
+             between attempts, never actually stopping. *)
     -> unit
     -> t
-  (** No [~client] parameter: this controller's [Reflector] opens its own
-      dedicated connection internally (see {!Reflector.Make}'s [create]),
-      cloned from [Context.client ctx] via [env]. [Rec.reconcile] is free
-      to use [Context.client ctx] itself for status updates or other
-      ad-hoc calls (e.g. via {!Finalizer}) without any risk of it starving
-      behind this controller's own WATCH — they're now always different
-      connections, structurally, not just by the caller's discipline.
+  (** No [~env] or [~client] parameter: both come from [ctx]. This
+      controller's [Reflector] opens its own dedicated connection internally
+      (see {!Reflector.Make}'s [create]), cloned from [Context.client ctx]
+      via [Context.env ctx]. [Rec.reconcile] is free to use [Context.client
+      ctx] itself for status updates or other ad-hoc calls (e.g. via
+      {!Finalizer}) without any risk of it starving behind this controller's
+      own WATCH — they're now always different connections, structurally,
+      not just by the caller's discipline.
 
       [?owns] declares secondary (child) Kinds this controller creates and
       therefore needs to reconcile its primary on changes to. For each
@@ -53,13 +65,6 @@ module Make (Rec : Reconciler.S) : sig
       [Request.t], or [None] for children this controller doesn't own).
       Without this, a child that is deleted or drifts is never noticed,
       because the primary Kind didn't move — see {!Secondary}.
-
-      [clock] is needed only to build this controller's [Workqueue] (its
-      [add_after]/[add_rate_limited] timers) — it can't be recovered from
-      [ctx], since [Context] deliberately only exposes [Context.sleep], not
-      the underlying row-polymorphic [Eio.Time.clock] (see
-      [Context.create]'s doc comment for why). Pass the same clock used to
-      build [ctx].
 
       For each reconcile that returns [Ok { status = Some s; action }]: the
       object is looked up in the cache again (it may have been [None] when

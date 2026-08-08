@@ -1,7 +1,6 @@
 module Make (R : Resource.S) = struct
   type t =
     { ctx : Context.t
-    ; env : Eio_unix.Stdenv.base
     ; namespace : string option
     ; label_selector : string option
     ; field_selector : string option
@@ -10,8 +9,8 @@ module Make (R : Resource.S) = struct
     ; cache : R.t Cache.t
     }
 
-  let create ~ctx ~env ?namespace ?label_selector ?field_selector ?watch_timeout_seconds ~on_event () =
-    { ctx; env; namespace; label_selector; field_selector; watch_timeout_seconds; on_event; cache = Cache.create () }
+  let create ~ctx ?namespace ?label_selector ?field_selector ?watch_timeout_seconds ~on_event () =
+    { ctx; namespace; label_selector; field_selector; watch_timeout_seconds; on_event; cache = Cache.create () }
 
   let cache t = t.cache
 
@@ -33,7 +32,7 @@ module Make (R : Resource.S) = struct
        here: retried with the same backoff as LIST/WATCH failures below,
        never gives up. *)
     let rec connect () =
-      match Client.clone ~sw t.env (Context.client t.ctx) with
+      match Client.clone ~sw (Context.env t.ctx) (Context.client t.ctx) with
       | Ok client -> client
       | Error e ->
         Context.log t.ctx "reflector[%s]: failed to open a dedicated connection: %s" (Gvk.to_string R.gvk)

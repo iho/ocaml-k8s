@@ -84,9 +84,9 @@ let () =
     match Client.of_env ~sw env with
     | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
     | Ok client ->
-      let ctx = Context.create ~sw ~client ~clock:env#clock () in
-      let pod_controller = Pod_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
-      let config_map_controller = Config_map_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
+      let ctx = Context.create ~sw ~env ~client () in
+      let pod_controller = Pod_controller.create ~ctx ?namespace () in
+      let config_map_controller = Config_map_controller.create ~ctx ?namespace () in
       let manager = Manager.create ~ctx () in
       Manager.add_controller manager pod_controller;
       Manager.add_controller manager config_map_controller;
@@ -96,7 +96,7 @@ let () =
         warmed_up := true;
         traceln "warmup complete, /readyz's \"warmup\" check now passes");
       Manager.add_readiness_check manager ~name:"warmup" (fun () -> !warmed_up);
-      Manager.serve_health ~sw env manager ~port:8080;
+      Manager.serve_health ~sw manager ~port:8080;
       traceln "-- serving http://127.0.0.1:8080/healthz and /readyz --";
       ignore (Manager.run ~sw manager)
   with Exit -> traceln "stopped."

@@ -54,8 +54,8 @@ let () =
     match Client.of_env ~sw env with
     | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
     | Ok client ->
-      let ctx = Context.create ~sw ~client ~clock:env#clock () in
-      let controller = Pod_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
+      let ctx = Context.create ~sw ~env ~client () in
+      let controller = Pod_controller.create ~ctx ?namespace () in
       let config =
         Leader_election.default_config ~lease_name:"leader-demo" ~lease_namespace ~identity ~lease_duration:5.0
           ~retry_period:1.0 ()
@@ -63,7 +63,7 @@ let () =
       let manager = Manager.create ~ctx () in
       let manager = Manager.with_leader_election manager config in
       Manager.add_controller manager controller;
-      Manager.serve_health ~sw env manager ~port:health_port;
+      Manager.serve_health ~sw manager ~port:health_port;
       traceln "-- candidate %s competing for lease %s/leader-demo (health on :%d) --" identity lease_namespace
         health_port;
       ignore (Manager.run ~sw manager)

@@ -70,8 +70,8 @@ let () =
   match Client.of_env ~sw env with
   | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
   | Ok client ->
-    let ctx = Context.create ~sw ~client ~clock:env#clock () in
-    let controller = My_controller.create ~ctx ~env ~clock:env#clock () in
+    let ctx = Context.create ~sw ~env ~client () in
+    let controller = My_controller.create ~ctx () in
     Controller.run ~sw controller
 ```
 
@@ -117,11 +117,15 @@ reconciler with no CRD YAML, since there's no schema to hand-write.
   new `status`) or why it failed. Pure enough to unit-test directly —
   see `test/test_reconciler.ml`.
 - **`Controller.Make(Reconciler)`** — wires a `Reflector`, a `Cache`, and
-  a `Workqueue` around your reconciler, running `workers` worker fibers.
-  Applies the reconciler's requested status write itself; if that PUT hits
-  a 409 conflict it refetches the object from the API server and retries
-  once before falling back to a backoff requeue. An optional `~owns` list
-  of `Secondary.S` runs extra reflectors over child Kinds, mapping child
+  a `Workqueue` around your reconciler, running `?workers` worker fibers
+  (default 1). Applies the reconciler's requested status write itself; if
+  that PUT hits a 409 conflict it refetches the object from the API server
+  and retries once before falling back to a backoff requeue. A reconcile
+  error is retried with exponential backoff (`?base_delay`/`?max_delay`,
+  defaults 0.005s/1000s) forever by default, or `?max_retries` times before
+  it's dropped and logged instead — a deliberately-broken object no retry
+  can ever fix shouldn't spin forever. An optional `~owns` list of
+  `Secondary.S` runs extra reflectors over child Kinds, mapping child
   events back onto the primary's reconcile key (so a child that's deleted
   or drifts reconciles its owner). Emits Prometheus-shaped metrics on
   every reconcile regardless of whether anything's listening (see
@@ -212,7 +216,7 @@ no reconciler-side code:
 ```ocaml
 let registry = Metrics_prometheus.create () in
 Metrics_prometheus.serve ~sw env registry ~port:9090;  (* GET /metrics *)
-let ctx = Context.create ~sw ~client ~clock:env#clock
+let ctx = Context.create ~sw ~env ~client
             ~metrics:(Metrics_prometheus.context_metrics registry) () in
 ```
 
@@ -287,7 +291,7 @@ rather than an automated E2E suite.
 |---|---|
 | `bin/hello_operator.ml` | The whole stack in ~20 lines — start here |
 | `bin/reflector_demo.ml` | Reflector + Cache only, no reconciler |
-| `bin/controller_demo.ml` | Full loop, untyped, multiple workers |
+| `bin/controller_demo.ml` | Full loop, untyped, multiple workers, `~max_retries` |
 | `bin/webapp_demo.ml` / `bin/webapp_gen_demo.ml` | A typed CRD, a real `/status` PUT, a finalizer (hand-written vs. `gen_resource`-generated) |
 | `bin/owned_child_demo.ml` | Creating a child object with an `OwnerReference` — no finalizer |
 | `bin/periodic_demo.ml` | `Requeue_after` — reconciling on a timer, not just on watch events |

@@ -78,6 +78,26 @@ let test_rate_limited_backoff_increases ~sw ~clock () =
   Wq.forget wq a;
   traceln "OK  add_rate_limited backoff increases across consecutive calls"
 
+let test_failure_count ~sw ~clock () =
+  let wq = Wq.create ~sw ~clock ~base_delay:0.001 ~max_delay:0.01 () in
+  let a = req "a" in
+  check "failure_count starts at 0" (Wq.failure_count wq a = 0);
+  let bump_and_drain () =
+    Wq.add_rate_limited wq a;
+    (match Wq.get wq with
+     | Some r -> check "delivers a" (r = a)
+     | None -> failwith "expected a");
+    Wq.done_ wq a
+  in
+  bump_and_drain ();
+  check "failure_count = 1 after one add_rate_limited" (Wq.failure_count wq a = 1);
+  bump_and_drain ();
+  check "failure_count = 2 after a second add_rate_limited" (Wq.failure_count wq a = 2);
+  check "peeking failure_count doesn't itself count as an attempt" (Wq.failure_count wq a = 2);
+  Wq.forget wq a;
+  check "forget resets failure_count to 0" (Wq.failure_count wq a = 0);
+  traceln "OK  failure_count tracks add_rate_limited calls, reset by forget"
+
 let test_shutdown_unblocks_get ~sw ~clock () =
   let wq = Wq.create ~sw ~clock () in
   let result = ref (Some (req "never set")) in
@@ -121,6 +141,7 @@ let () =
   test_redeliver_if_dirty_after_done ~sw ~clock ();
   test_add_after ~sw ~clock ();
   test_rate_limited_backoff_increases ~sw ~clock ();
+  test_failure_count ~sw ~clock ();
   test_shutdown_unblocks_get ~sw ~clock ();
   test_cancel_while_blocked_in_get_does_not_poison ~sw ~clock ();
   traceln "ALL WORKQUEUE TESTS PASSED"

@@ -176,8 +176,8 @@ let () =
     match Client.of_env ~sw env with
     | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
     | Ok client ->
-      let ctx = Context.create ~sw ~client ~clock:env#clock () in
-      let controller = App_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
+      let ctx = Context.create ~sw ~env ~client () in
+      let controller = App_controller.create ~ctx ?namespace () in
       traceln "-- owned-child-object controller starting --";
       Controller.run ~sw controller
   with Exit -> traceln "stopped."

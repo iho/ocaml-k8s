@@ -51,8 +51,8 @@ let () =
       let registry = Metrics_prometheus.create () in
       Metrics_prometheus.serve ~sw env registry ~port:metrics_port;
       traceln "-- serving http://127.0.0.1:%d/metrics --" metrics_port;
-      let ctx = Context.create ~sw ~client ~clock:env#clock ~metrics:(Metrics_prometheus.context_metrics registry) () in
-      let controller = My_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
+      let ctx = Context.create ~sw ~env ~client ~metrics:(Metrics_prometheus.context_metrics registry) () in
+      let controller = My_controller.create ~ctx ?namespace () in
       traceln "-- metrics-instrumented controller starting --";
       Controller.run ~sw controller
   with Exit -> traceln "stopped."

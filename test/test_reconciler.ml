@@ -121,7 +121,7 @@ let () =
   match K8s.Client.create ~sw env ~base_url:(Printf.sprintf "http://127.0.0.1:%d" port) () with
   | Error e -> failwith ("stub Client.create failed: " ^ K8s.Client.Error.to_string e)
   | Ok client ->
-    let ctx = K8s.Context.create ~sw ~client ~clock:env#clock () in
+    let ctx = K8s.Context.create ~sw ~env ~client () in
     (* Give the accept loop (a separate system thread) a beat to catch up
        with whatever connection(s) Client.create's own eager connect just
        opened, so the baseline below isn't racing it. *)

@@ -33,7 +33,7 @@ let () =
     match Client.of_env ~sw env with
     | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
     | Ok client ->
-      let ctx = Context.create ~sw ~client ~clock:env#clock () in
+      let ctx = Context.create ~sw ~env ~client () in
       let on_event (ev : Pods.t Watch_event.t) =
         let kind_str =
           match ev.kind with
@@ -45,7 +45,7 @@ let () =
         traceln "EVENT   %-8s %-40s resourceVersion=%s" kind_str (Request.to_string ev.request)
           (Option.value (Pods.resource_version ev.object_) ~default:"?")
       in
-      let reflector = Pod_reflector.create ~ctx ~env ?namespace ~on_event () in
+      let reflector = Pod_reflector.create ~ctx ?namespace ~on_event () in
       Fiber.fork ~sw (fun () -> Pod_reflector.run ~sw reflector);
       Cache.wait_for_sync (Pod_reflector.cache reflector);
       traceln "-- synced: %d pod(s) in cache --"

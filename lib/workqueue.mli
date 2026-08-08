@@ -39,6 +39,12 @@ val add_rate_limited : t -> Request.t -> unit
 val forget : t -> Request.t -> unit
 (** Reset a key's backoff counter. Call on successful reconcile. *)
 
+val failure_count : t -> Request.t -> int
+(** How many times this key has been rate-limited (via [add_rate_limited])
+    since its last [forget], without incrementing that count itself — lets a
+    caller decide whether to give up on a key ([forget]) instead of
+    requeuing it again. *)
+
 val get : t -> Request.t option
 (** Blocks until an item is available, marking it "processing"; returns
     [None] once [shutdown] has been called and the queue has drained. *)

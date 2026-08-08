@@ -7,7 +7,6 @@ module Make (R : Resource.S) : sig
 
   val create :
      ctx:Context.t
-    -> env:Eio_unix.Stdenv.base
     -> ?namespace:string
     -> ?label_selector:string
     -> ?field_selector:string
@@ -20,8 +19,13 @@ module Make (R : Resource.S) : sig
       after the cache has already been updated — a [Controller] wires this
       to [Workqueue.add].
 
-      No [~client] parameter: [run] opens its own, via {!Client.clone} on
-      [Context.client ctx]. Earlier versions of this took a caller-
+      No [~env] parameter: [run] gets it from [Context.env ctx], the same
+      place it gets the client to clone from — one fewer thing a caller has
+      to thread down separately from [ctx].
+
+      No [~client] parameter either: [run] opens its own, via
+      {!Client.clone} on [Context.client ctx]. Earlier versions of this took
+      a caller-
       supplied [~client] instead, on the reasoning that a WATCH is
       long-lived and anything else sharing its connection (e.g. a
       reconciler's own status PUT, issued via [Context.client ctx])

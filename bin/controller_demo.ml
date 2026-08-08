@@ -5,7 +5,13 @@
      dune exec bin/controller_demo.exe -- kube-system
    The reconcile counter printed alongside each line is a rough way to see
    the Workqueue's dedup in action: a burst of MODIFIED events on the same
-   pod collapses into far fewer reconciles than events. *)
+   pod collapses into far fewer reconciles than events.
+
+   Also the reference for [Controller.Make(_).create]'s tunables beyond
+   the defaults: [~workers] (concurrency) and [~max_retries]/[~base_delay]/
+   [~max_delay] (how hard a controller retries a reconcile that keeps
+   returning [Error] before giving up on that key and logging instead of
+   requeuing it forever — see `lib/controller.mli`). *)
 
 open Eio
 open K8s
@@ -49,8 +55,8 @@ let () =
     match Client.of_env ~sw env with
     | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
     | Ok client ->
-      let ctx = Context.create ~sw ~client ~clock:env#clock () in
-      let controller = Pod_controller.create ~ctx ~env ~clock:env#clock ?namespace ~workers:2 () in
-      traceln "-- controller starting (2 workers) --";
+      let ctx = Context.create ~sw ~env ~client () in
+      let controller = Pod_controller.create ~ctx ?namespace ~workers:2 ~max_retries:5 () in
+      traceln "-- controller starting (2 workers, giving up on a key after 5 failed reconciles) --";
       Controller.run ~sw controller
   with Exit -> traceln "stopped."

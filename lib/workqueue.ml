@@ -92,6 +92,11 @@ let len t = Eio.Mutex.use_ro t.mutex (fun () -> Queue.length t.queue)
 
 let forget t req = Eio.Mutex.use_rw ~protect:false t.mutex (fun () -> Hashtbl.remove t.failures req)
 
+(* Read-only: unlike [next_delay], doesn't count as an attempt itself, so a
+   caller can check "have we already retried this too many times?" before
+   deciding whether to requeue at all. *)
+let failure_count t req = Eio.Mutex.use_ro t.mutex (fun () -> Option.value (Hashtbl.find_opt t.failures req) ~default:0)
+
 (* [base_delay * 2^failures], capped at [max_delay]; mirrors client-go's
    ItemExponentialFailureRateLimiter. *)
 let next_delay t req =

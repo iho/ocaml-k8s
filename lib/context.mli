@@ -39,24 +39,25 @@ module Metrics : sig
       duration in seconds. *)
 end
 
-val create :
-   sw:Eio.Switch.t
-  -> client:Client.t
-  -> clock:_ Eio.Time.clock
-  -> ?log:(string -> unit)
-  -> ?metrics:Metrics.t
-  -> unit
-  -> t
-(** [clock] is consumed immediately to close over an internal [sleep]
-    closure — [Eio.Time.clock] is a row-polymorphic resource type (its
-    concrete instantiation varies by backend), so [Context.t] cannot store
-    one monomorphically without itself becoming parametric. Exposing just
-    {!sleep} (all any caller in this design actually needs) sidesteps that
-    while keeping [Context.t] a plain, non-parametric type — important
-    since [Reflector]/[Controller]/[Manager] all reference it directly. *)
+val create : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> client:Client.t -> ?log:(string -> unit) -> ?metrics:Metrics.t -> unit -> t
+(** Takes the whole [env] (needed anyway by anything that opens its own
+    network connection, e.g. a Reflector's dedicated watch connection via
+    {!Client.clone}), not a bare [clock]: [Eio.Time.clock] alone is a
+    row-polymorphic resource type (its concrete instantiation varies by
+    backend), so [Context.t] couldn't store one monomorphically without
+    itself becoming parametric, but [Eio_unix.Stdenv.base] is concrete and
+    can be. [env#clock] is consumed immediately to close over the internal
+    {!sleep}/{!now} closures. This is what lets [Controller.create] and
+    [Reflector.create] take just [~ctx] instead of [~ctx ~env ~clock]. *)
 
+val env : t -> Eio_unix.Stdenv.base
 val client : t -> Client.t
 val sleep : t -> float -> unit
+val now : t -> float
+(** Monotonic-ish wall-clock seconds from the same [env#clock] {!sleep}
+    uses — e.g. for measuring a reconcile's duration by subtracting two
+    calls, as {!Controller} does. *)
+
 val log : t -> ('a, unit, string, unit) format4 -> 'a
 val metrics : t -> Metrics.t
 

@@ -98,7 +98,8 @@ let render_checks checks =
   let body = String.concat "\n" (lines @ (if all_ok then [ "healthz check passed" ] else [ "healthz check failed" ])) ^ "\n" in
   all_ok, body
 
-let serve_health ~sw env (t : t) ~port =
+let serve_health ~sw (t : t) ~port =
+  let env = Context.env t.ctx in
   let address = `Tcp (Eio.Net.Ipaddr.V4.any, port) in
   let config = Piaf.Server.Config.create address in
   let handler ({ request; _ } : _ Piaf.Server.ctx) =

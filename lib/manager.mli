@@ -87,10 +87,11 @@ val render_checks : (string * (unit -> bool)) list -> bool * string
     check list with no server or cluster involved; {!serve_health} is
     what actually calls it. *)
 
-val serve_health : sw:Eio.Switch.t -> Eio_unix.Stdenv.base -> t -> port:int -> unit
+val serve_health : sw:Eio.Switch.t -> t -> port:int -> unit
 (** Starts a plain HTTP server (like {!Metrics_prometheus.serve} — meant
     to be probed by the kubelet from inside the pod network, not exposed
-    externally) forked onto [sw], answering:
+    externally) forked onto [sw], using [Context.env] of [t]'s own [ctx] —
+    no separate [Eio_unix.Stdenv.base] parameter needed — answering:
     - [GET /healthz]: every check registered via {!add_health_check}.
     - [GET /readyz]: every check registered via {!add_readiness_check},
       plus, without the caller doing anything: [<kind>-synced] for each
