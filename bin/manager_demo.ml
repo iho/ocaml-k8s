@@ -19,7 +19,13 @@
    there's no risk of one controller's long-lived WATCH starving the
    other's — that used to require the caller to manually build a separate
    [Client.t] per controller and remember not to mix them up; now it's
-   automatic and there's nothing to get wrong. *)
+   automatic and there's nothing to get wrong.
+
+   Also serves /healthz and /readyz on :8080 (see [Manager.serve_health])
+   -- registers one artificial readiness check ("warmup") that stays
+   failed for the first 5s, purely so `curl http://127.0.0.1:8080/readyz`
+   run twice a few seconds apart actually shows a 503 -> 200 transition,
+   not just the steady state. *)
 
 open Eio
 open K8s
@@ -84,5 +90,13 @@ let () =
       let manager = Manager.create ~ctx () in
       Manager.add_controller manager pod_controller;
       Manager.add_controller manager config_map_controller;
+      let warmed_up = ref false in
+      Fiber.fork ~sw (fun () ->
+        Time.sleep env#clock 5.0;
+        warmed_up := true;
+        traceln "warmup complete, /readyz's \"warmup\" check now passes");
+      Manager.add_readiness_check manager ~name:"warmup" (fun () -> !warmed_up);
+      Manager.serve_health ~sw env manager ~port:8080;
+      traceln "-- serving http://127.0.0.1:8080/healthz and /readyz --";
       Manager.run ~sw manager
   with Exit -> traceln "stopped."

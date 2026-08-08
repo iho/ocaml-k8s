@@ -153,6 +153,10 @@ reconciler with no CRD YAML, since there's no schema to hand-write.
 - **Admission webhooks** — `Admission` handles both validating and
   mutating webhooks through one interface (`Request.t -> decision`),
   served over real TLS.
+- **Health & readiness checks** — `Manager.serve_health` answers
+  `/healthz`/`/readyz`; readiness includes every registered controller's
+  cache-sync state and current leadership (if `with_leader_election` is
+  used) automatically, with no caller code required.
 
 ## Generators
 
@@ -226,6 +230,33 @@ local-testing setup, including why `clientConfig.url` with
 `host.docker.internal` is what makes a `kind` cluster on Docker Desktop
 able to reach a webhook server running on the host.
 
+## Health & readiness checks
+
+```ocaml
+Manager.serve_health ~sw env manager ~port:8080;  (* GET /healthz, /readyz *)
+Manager.add_readiness_check manager ~name:"warmed-up" (fun () -> !some_flag);
+```
+
+`/readyz` always includes, with no caller code required: `<kind>-synced`
+for every registered controller (from `Controller.is_synced` — false
+until its first LIST has landed) and, if `with_leader_election` was used,
+`leader-election` (false until this replica has acquired the Lease).
+`add_health_check`/`add_readiness_check` are for anything beyond that —
+a dependency check, a warmup flag. A check that raises counts as failed
+rather than crashing the request — deliberately different from
+`Controller`'s reconcile loop or `Admission.serve`, both of which let an
+unexpected exception propagate as a bug: a health check's whole job is
+answering "is this broken," and an exception from one *is* that answer.
+Response body lists each check as `[+]name ok`/`[-]name failed`, the same
+format `k8s.io/apiserver`'s own `/healthz` uses; 200 if everything in
+that response passed, 503 if anything failed.
+
+Verified against a real cluster via `bin/manager_demo.ml` (an artificial
+"warmup" readiness check observed transitioning 503 → 200 after 5s,
+alongside both controllers' real `-synced` checks) and two
+`bin/leader_demo.ml` candidates (the `leader-election` check read `false`
+for the standby and `true` for whichever actually held the lease).
+
 ## Examples & tooling
 
 Everything below is development tooling, not the library — demos
@@ -241,8 +272,8 @@ rather than an automated E2E suite.
 | `bin/webapp_demo.ml` / `bin/webapp_gen_demo.ml` | A typed CRD, a real `/status` PUT, a finalizer (hand-written vs. `gen_resource`-generated) |
 | `bin/owned_child_demo.ml` | Creating a child object with an `OwnerReference` — no finalizer |
 | `bin/periodic_demo.ml` | `Requeue_after` — reconciling on a timer, not just on watch events |
-| `bin/manager_demo.ml` | Multiple controllers (different Kinds) under one `Manager` |
-| `bin/leader_demo.ml` | Leader election / HA failover |
+| `bin/manager_demo.ml` | Multiple controllers (different Kinds) under one `Manager`, plus `/healthz`/`/readyz` |
+| `bin/leader_demo.ml` | Leader election / HA failover, plus the `leader-election` readiness check |
 | `bin/metrics_demo.ml` | Real Prometheus `/metrics` |
 | `bin/webhook_demo.ml` | Validating + mutating admission webhooks |
 | `bin/main.ml` | The original hardcoded-to-Pods LIST+WATCH CLI, predating `Controller`/`Manager` — kept as a low-level `Client` sanity check |
@@ -277,8 +308,6 @@ each piece is built, not by an automated E2E suite.
 
 ## Known limitations
 
-- `Manager.add_health_check`/`add_readiness_check` are stub signatures
-  (`lib/manager.mli`), not implemented.
 - No secondary-resource watches — mapping a child object's events back
   to its owner's reconcile key. `bin/owned_child_demo.ml` shows the
   owner-reference pattern by hand instead.

@@ -14,6 +14,18 @@ val run : sw:Eio.Switch.t -> t -> unit
     (inline, before forking the workers) on [Cache.wait_for_sync] so the
     first reconcile of any object already sees a warm cache. *)
 
+val name : t -> string
+(** The Kind this controller reconciles (its [Gvk.t.kind]) — used to
+    label its metrics (see the [Make(Rec).create] doc comment below) and
+    to name its entry in {!Manager}'s built-in readiness checks. *)
+
+val is_synced : t -> bool
+(** Non-blocking: [false] until this controller's [Cache] has completed
+    its initial LIST (before [run] has even been called, or while the
+    first LIST is still in flight) — see {!Cache.is_synced}. What
+    {!Manager.serve_health} reports readiness from, one check per
+    registered controller. *)
+
 module Make (Rec : Reconciler.S) : sig
   val create :
      ctx:Context.t

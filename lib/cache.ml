@@ -18,6 +18,7 @@ let create () =
 let get t req = Eio.Mutex.use_ro t.mutex (fun () -> Hashtbl.find_opt t.table req)
 let list t = Eio.Mutex.use_ro t.mutex (fun () -> Hashtbl.fold (fun _ v acc -> v :: acc) t.table [])
 let wait_for_sync t = Eio.Promise.await t.synced
+let is_synced t = t.is_synced
 
 module Writer = struct
   let set t req v = Eio.Mutex.use_rw ~protect:false t.mutex (fun () -> Hashtbl.replace t.table req v)

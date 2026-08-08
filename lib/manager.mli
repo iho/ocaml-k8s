@@ -56,9 +56,46 @@ val with_leader_election : t -> Leader_election.config -> t
     {!Leader_election.Leadership_lost} tears down every controller sharing
     [run]'s [~sw] — see that exception's doc comment. *)
 
-(* --- extension points: real signature now, stub implementation later --- *)
-
 val add_health_check : t -> name:string -> (unit -> bool) -> unit
+(** Registers an extra, named liveness check — {!serve_health}'s
+    [/healthz] fails (503) if any registered check returns [false] or
+    raises (a check throwing counts as "failed", not a crash — see
+    {!serve_health}). No checks registered at all still answers 200: a
+    process able to answer the request is, by definition, alive. Order
+    of registration relative to {!serve_health} doesn't matter — checks
+    are read fresh on every request, not snapshotted. *)
+
 val add_readiness_check : t -> name:string -> (unit -> bool) -> unit
-(** Roadmap Phase 6: wired to an HTTP endpoint, reusing Piaf's server side
-    ([Piaf.Server], already available). *)
+(** Same, for {!serve_health}'s [/readyz] — for anything a caller's own
+    reconcilers or dependencies need beyond the two checks {!serve_health}
+    always includes for free (see there): every registered controller's
+    initial cache sync, and current leadership if
+    {!with_leader_election} was used. *)
+
+val render_checks : (string * (unit -> bool)) list -> bool * string
+(** Runs every [(name, check)] pair and builds the [/healthz]/[/readyz]
+    response {!serve_health} sends — [(all_ok, body)]. A check that
+    raises counts as failed rather than propagating (see {!serve_health}).
+    Exposed, like {!Metrics_prometheus.render} and
+    {!Admission.response_json}, purely so it — the actual
+    decision/formatting logic — can be unit-tested against a synthetic
+    check list with no server or cluster involved; {!serve_health} is
+    what actually calls it. *)
+
+val serve_health : sw:Eio.Switch.t -> Eio_unix.Stdenv.base -> t -> port:int -> unit
+(** Starts a plain HTTP server (like {!Metrics_prometheus.serve} — meant
+    to be probed by the kubelet from inside the pod network, not exposed
+    externally) forked onto [sw], answering:
+    - [GET /healthz]: every check registered via {!add_health_check}.
+    - [GET /readyz]: every check registered via {!add_readiness_check},
+      plus, without the caller doing anything: [<kind>-synced] for each
+      registered controller (from {!Controller.is_synced} — false until
+      its first LIST has landed) and, only if {!with_leader_election} was
+      used, [leader-election] (false until this replica has acquired the
+      lease; see {!with_leader_election}'s doc comment for why it never
+      goes back to [false] afterwards).
+
+    Response body lists each check as [\[+\]name ok] or [\[-\]name failed],
+    one per line — the same format `k8s.io/apiserver`'s own [/healthz]
+    uses, recognizable if you've read one before. 200 if every check in
+    that response passed, 503 if any failed. 404 for any other path. *)

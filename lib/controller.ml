@@ -2,10 +2,21 @@
    Reflector, the worker fibers) into a closure captured at [create] time
    and only run when [run ~sw] supplies one. This is what lets every
    [Make(Rec).create] return the same concrete, non-parameterised type: the
-   closure closes over [Rec.R] internally, and it never appears in [t]. *)
-type t = { start : sw:Eio.Switch.t -> unit }
+   closure closes over [Rec.R] internally, and it never appears in [t].
+   [is_synced] is a second closure for the same reason: it reads a cache
+   that doesn't exist until [start] has actually run (the [Reflector], and
+   the [Cache] it owns, are only created inside [start]'s closure), so it
+   has to be [unit -> bool], not a plain field snapshotted at [create]
+   time — before [start] runs, it always answers [false]. *)
+type t =
+  { start : sw:Eio.Switch.t -> unit
+  ; name : string
+  ; is_synced : unit -> bool
+  }
 
 let run ~sw (t : t) = t.start ~sw
+let name (t : t) = t.name
+let is_synced (t : t) = t.is_synced ()
 
 module Make (Rec : Reconciler.S) = struct
   module Rf = Reflector.Make (Rec.R)
@@ -18,13 +29,15 @@ module Make (Rec : Reconciler.S) = struct
   let metric_labels = [ "kind", Rec.R.gvk.kind; "group_version", Gvk.api_version Rec.R.gvk ]
 
   let create ~ctx ~env ~clock ?namespace ?label_selector ?(workers = 1) () : t =
+    let cache_ref : Rec.R.t Cache.t option ref = ref None in
     let start ~sw =
       let wq = Workqueue.create ~sw ~clock () in
       let on_event (ev : Rec.R.t Watch_event.t) = Workqueue.add wq ev.request in
       let reflector = Rf.create ~ctx ~env ?namespace ?label_selector ~on_event () in
       Eio.Fiber.fork ~sw (fun () -> Rf.run ~sw reflector);
-      Cache.wait_for_sync (Rf.cache reflector);
       let cache = Rf.cache reflector in
+      cache_ref := Some cache;
+      Cache.wait_for_sync cache;
       let metrics = Context.metrics ctx in
       Eio.Fiber.fork ~sw (fun () ->
         (* A queue depth gauge has no natural "event" to hang off of the
@@ -114,5 +127,10 @@ module Make (Rec : Reconciler.S) = struct
         Eio.Fiber.fork ~sw worker
       done
     in
-    { start }
+    let is_synced () =
+      match !cache_ref with
+      | None -> false
+      | Some cache -> Cache.is_synced cache
+    in
+    { start; name = Rec.R.gvk.kind; is_synced }
 end

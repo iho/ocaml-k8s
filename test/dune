@@ -13,3 +13,7 @@
 (test
  (name test_admission)
  (libraries k8s base64))
+
+(test
+ (name test_manager_health)
+ (libraries k8s))

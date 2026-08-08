@@ -8,7 +8,13 @@
    pods at a time; kill it (SIGKILL, so it can't release cleanly) and the
    other should take over once the lease goes stale (~lease_duration,
    shortened below for a fast-to-observe demo — production code should use
-   {!Leader_election.default_config}'s real defaults instead). *)
+   {!Leader_election.default_config}'s real defaults instead).
+
+   Also serves /healthz and /readyz -- port defaults to 8080, pass a 3rd
+   argument to change it (needed to run two candidates on one host, since
+   they can't share a port). /readyz's "leader-election" check should
+   read false for the standby candidate and true for whichever is
+   currently leading -- worth curling both while both are running. *)
 
 open Eio
 open K8s
@@ -38,6 +44,7 @@ let () =
     if Array.length Sys.argv > 1 then Sys.argv.(1) else Printf.sprintf "candidate-%d" (Unix.getpid ())
   in
   let namespace = if Array.length Sys.argv > 2 then Some Sys.argv.(2) else None in
+  let health_port = if Array.length Sys.argv > 3 then int_of_string Sys.argv.(3) else 8080 in
   let lease_namespace = Option.value namespace ~default:"default" in
   Eio_main.run
   @@ fun env ->
@@ -56,6 +63,8 @@ let () =
       let manager = Manager.create ~ctx () in
       let manager = Manager.with_leader_election manager config in
       Manager.add_controller manager controller;
-      traceln "-- candidate %s competing for lease %s/leader-demo --" identity lease_namespace;
+      Manager.serve_health ~sw env manager ~port:health_port;
+      traceln "-- candidate %s competing for lease %s/leader-demo (health on :%d) --" identity lease_namespace
+        health_port;
       Manager.run ~sw manager
   with Exit -> traceln "stopped."

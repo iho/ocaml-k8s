@@ -12,6 +12,11 @@ val wait_for_sync : 'a t -> unit
     workqueue, so the very first reconcile of any object already sees a
     warm cache (mirrors controller-runtime's WaitForCacheSync gate). *)
 
+val is_synced : 'a t -> bool
+(** Non-blocking version of {!wait_for_sync} — for e.g. a readiness check
+    (see [Controller.is_synced]/[Manager.serve_health]) that wants to
+    report "not yet" rather than block the HTTP request answering it. *)
+
 (** Write access, used only by [Reflector]. Kept in a submodule (rather
     than a separate library / .mli pair) so the type stays the same ['a
     t] — callers outside this library are expected to just never open
