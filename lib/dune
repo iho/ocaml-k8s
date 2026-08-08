@@ -1,3 +1,4 @@
 (library
  (name k8s)
+ (public_name k8s)
  (libraries eio eio.unix piaf uri yojson))

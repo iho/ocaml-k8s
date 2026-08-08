@@ -1,3 +1,7 @@
 (executable
  (name gen_resource)
  (libraries yaml yojson))
+
+(executable
+ (name scaffold_operator)
+ (libraries unix))

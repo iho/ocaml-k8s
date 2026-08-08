@@ -134,6 +134,7 @@ LIST+WATCH client. Current status per module:
 | `Finalizer` | done — `has`/`add`/`remove`, JSON-level (no `with_finalizers` needed on `Resource.S`); see `bin/webapp_demo.ml` |
 | `Lease`, `Leader_election` | done — typed `coordination.k8s.io/v1` Lease binding + an acquire/steal/renew loop (patient acquire, hard-deadline renew, fails the switch via `Leadership_lost` if renewal can't keep up); see `bin/leader_demo.ml` |
 | `gen/gen_resource.ml` | done — a small, selective CRD-YAML-to-`Resource.S` generator (see "Generating typed CRD bindings" below); `generated/web_app.ml` (built by a dune rule from `examples/webapp-crd.yaml`) and `bin/webapp_gen_demo.ml` prove it's a drop-in replacement for the hand-written `Web_app` |
+| `gen/scaffold_operator.ml` | done — a kubebuilder-init-style generator that writes a whole new, standalone operator project (`dune-project`/`bin/`/`deploy/*.yaml`), not a module to embed in this one (see "Scaffolding a new operator" below) |
 
 This completes the roadmap's core bottom-up build-out plus the finalizer
 and leader-election extension points (`Phase 6` health/readiness checks
@@ -246,6 +247,51 @@ to `bin/webapp_demo.ml`, just `module Web_app = Webapp_generated.Web_app`
 instead of an inline definition) passed the exact same finalizer-add,
 status-PUT, and finalizer-delete-and-gone scenarios as the hand-written
 version — see "Manual verification" below.
+
+## Scaffolding a new operator
+
+`gen/gen_resource.ml` (above) turns one CRD YAML into one module to embed
+in an *existing* dune project. `gen/scaffold_operator.ml` is different in
+kind, not just degree: it's a kubebuilder-init-style generator that writes
+out an entire new, standalone project — its own `dune-project`, `bin/`,
+and (for a custom CRD) `deploy/*.yaml` — meant to live outside this repo
+entirely, not a codegen step you re-run as your schema evolves.
+
+```sh
+dune exec gen/scaffold_operator.exe -- ./my-operator example.com v1 Widget
+# or, for a built-in Kind instead of a CRD:
+dune exec gen/scaffold_operator.exe -- ./pod-watcher core v1 Pod
+```
+
+`<group>` being `""` or `"core"` selects which of two templates gets
+emitted: a built-in Kind (`core`) gets a `Resource.Unstructured`-based
+reconciler with no CRD YAML, since there's no schema to hand-write (same
+shape as `bin/controller_demo.ml`); anything else gets a typed
+spec/status record with one example field each, clearly marked `TODO`,
+plus a matching CRD YAML and sample object (same shape as
+`bin/webapp_demo.ml`) — the generator's own templates are close copies of
+those two demos specifically so the output looks like normal,
+hand-writable code, not something bespoke to the generator. An optional
+5th argument overrides the pluralized REST path segment (default: the
+Kind lowercased plus `s`); a non-empty 6th argument marks the Kind
+cluster-scoped instead of namespaced.
+
+Since `k8s` isn't published on the public opam repository, a scaffolded
+project can't just list it as a normal opam dependency and have it
+resolve — `dune-project` here declares a `(package (name k8s) ...)` with
+`generate_opam_files true` (and `lib/dune` a matching `(public_name k8s)`)
+specifically so this repo itself becomes opam-pinnable, and every
+scaffolded project's generated `README.md` opens with the exact
+`opam pin add k8s <url-or-path>` command needed before its own
+`dune build` will find the library. Verified for real: scaffolded both a
+custom-CRD operator and a core-resource one, then built both against this
+repo (via a throwaway `dune-workspace` referencing this checkout, rather
+than actually mutating the local opam switch just to prove buildability)
+and ran the resulting binaries — both reached and exercised the exact
+same `Client.of_env`/`Context.create`/`Controller.create` wiring the
+hand-written demos use, failing cleanly with a connection-refused error
+since no `kubectl proxy` was running for that check, not a compile or
+link error.
 
 ## Notes / limitations
 
