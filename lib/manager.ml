@@ -22,6 +22,14 @@ let add_health_check t ~name f = t.health_checks <- (name, f) :: t.health_checks
 let add_readiness_check t ~name f = t.readiness_checks <- (name, f) :: t.readiness_checks
 
 let run ~sw (t : t) =
+  (* Resolves when [sw] is released (i.e. when the enclosing [Switch.run]
+     is tearing everything down — normal completion, or [Exit] raised by
+     this manager's own signal handlers, or [Leadership_lost]). Lets a
+     caller [await] the manager's lifetime instead of blocking on the
+     enclosing [Switch.run] themselves; the signal handlers / controllers
+     still do all the real work on [sw]. *)
+  let done_promise, resolve_done = Eio.Promise.create () in
+  Eio.Switch.on_release sw (fun () -> Eio.Promise.resolve resolve_done ());
   let shutdown signal_name =
     Context.log t.ctx "manager: received %s, shutting down..." signal_name;
     Eio.Switch.fail sw Exit
@@ -32,7 +40,7 @@ let run ~sw (t : t) =
     Context.log t.ctx "manager: starting %d controller(s)" (List.length t.controllers);
     List.iter (fun c -> Controller.run ~sw c) t.controllers
   in
-  match t.leader_election with
+  (match t.leader_election with
   | None -> start_controllers ()
   | Some config ->
     (* Forked, not called inline: [run] always forks-and-returns
@@ -50,7 +58,8 @@ let run ~sw (t : t) =
            is no graceful "no longer leader, but still running" state for
            a readiness check to observe. *)
         t.is_leader <- true;
-        start_controllers ()))
+        start_controllers ())));
+  done_promise
 
 (* Built-in readiness signals Manager already has enough information to
    provide for free: every controller's cache has completed its initial

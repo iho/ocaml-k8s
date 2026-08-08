@@ -66,5 +66,5 @@ let () =
       Manager.serve_health ~sw env manager ~port:health_port;
       traceln "-- candidate %s competing for lease %s/leader-demo (health on :%d) --" identity lease_namespace
         health_port;
-      Manager.run ~sw manager
+      ignore (Manager.run ~sw manager)
   with Exit -> traceln "stopped."

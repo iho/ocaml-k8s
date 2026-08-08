@@ -17,3 +17,7 @@
 (test
  (name test_manager_health)
  (libraries k8s))
+
+(test
+ (name test_client_retry)
+ (libraries eio eio_main k8s))

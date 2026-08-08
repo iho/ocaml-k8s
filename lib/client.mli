@@ -24,6 +24,14 @@ module Error : sig
                           HTML error page, ...) *)
     | Decode of string
 
+  val is_transient : t -> bool
+  (** [true] for failures that retrying has a reasonable chance of fixing:
+      a transport/connection error (the request may never have reached the
+      server), or a server-side 5xx. [false] for a definitive rejection
+      (4xx — [NotFound], [Conflict], bad request) which retrying cannot
+      change, and for {!Gone}/{!Decode} which a caller handles specially.
+      {!with_retry} uses this to decide what to retry. *)
+
   val to_string : t -> string
 end
 
@@ -39,13 +47,20 @@ val create :
   -> base_url:string
   -> ?token:string
   -> ?ca_cert:Piaf.Cert.t
+  -> ?client_cert:Piaf.Cert.t
+  -> ?client_key:Piaf.Cert.t
   -> ?insecure:bool
   -> unit
   -> (t, Error.t) result
 (** Explicit connection settings, for callers overriding the [of_env]
-    defaults (e.g. CLI flags). The underlying Piaf connection is closed
-    automatically via [Switch.on_release sw] — callers do not need to call
-    {!shutdown} themselves unless they want to close it early. *)
+    defaults (e.g. CLI flags). [client_cert]/[client_key] enable mutual TLS
+    (mTLS) — the API server requests a client certificate in the TLS
+    handshake, an alternative to bearer-token auth common for out-of-cluster
+    operators (a kubeconfig [client-certificate] + [client-key]). Both must
+    be given together; if only one is, it's ignored. The underlying Piaf
+    connection is closed automatically via [Switch.on_release sw] — callers
+    do not need to call {!shutdown} themselves unless they want to close it
+    early. *)
 
 val clone : sw:Eio.Switch.t -> Eio_unix.Stdenv.base -> t -> (t, Error.t) result
 (** Opens an *independent* connection (a fresh TCP+TLS handshake, not a
@@ -76,6 +91,7 @@ val watch :
   -> ?namespace:string
   -> ?label_selector:string
   -> ?field_selector:string
+  -> ?timeout_seconds:int
   -> resource_version:string
   -> on_event:('a Watch_event.t -> unit)
   -> unit
@@ -84,7 +100,14 @@ val watch :
     ADDED/MODIFIED/DELETED/BOOKMARK event, until the server closes the
     stream, [Error.Gone] is returned, or the enclosing [Switch] is
     cancelled — cancellation interrupts the underlying streaming HTTP read,
-    same as the already-verified low-level watch. *)
+    same as the already-verified low-level watch.
+
+    [timeout_seconds], if given, is sent as the [timeoutSeconds] query
+    param: it asks the API server to close the stream after that many
+    seconds (rather than its default, several minutes), which a {!Reflector}
+    treats as a routine "watch stream closed, re-list" and reconnects from.
+    Passing it gives a predictable re-list cadence that also functions as a
+    keep-alive check on the stream. *)
 
 val get :
    t
@@ -162,3 +185,28 @@ val patch :
     deliberately: constructing a merge patch usually means picking a subset
     of an object's fields, which the typed [Resource.S] layer can't express
     — a caller does it directly against the JSON. *)
+
+val with_retry :
+   ?max_attempts:int
+  -> ?base_delay:float
+  -> ?max_delay:float
+  -> sleep:(float -> unit)
+  -> (unit -> ('a, Error.t) result)
+  -> ('a, Error.t) result
+(** Runs [f ()] — a single [Client] operation returning [('a, Error.t)
+    result] — retrying on {!Error.is_transient} failures (transport errors
+    and 5xx) with capped exponential backoff, up to [max_attempts] total
+    tries ([base_delay] doubling per retry, capped at [max_delay]; the same
+    scheme {!Reflector} and {!Workqueue} already use). A non-transient
+    error, or the final attempt failing, is returned unchanged. [sleep] is
+    the caller's [Context.sleep].
+
+    Purpose: a reconciler calling the low-level client directly (a
+    [Client.get]/[Client.update] against [Context.client ctx]) gets the
+    same retry-on-transient-failure behaviour the Reflector/Controller
+    machinery already has, without threading backoff through every caller.
+    Reads (LIST/GET/WATCH) are inherently safe to retry; wrap a write
+    (PUT/PATCH/DELETE) only when its own idempotence makes a re-send safe —
+    in particular never wrap a [DeleteOptions]-preconditioned DELETE, whose
+    whole point is to reject a stale caller with a 409 rather than be
+    re-sent. *)

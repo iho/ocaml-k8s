@@ -11,6 +11,7 @@ module Make (R : Resource.S) : sig
     -> ?namespace:string
     -> ?label_selector:string
     -> ?field_selector:string
+    -> ?watch_timeout_seconds:int
     -> on_event:(R.t Watch_event.t -> unit)
     -> unit
     -> t
@@ -30,7 +31,13 @@ module Make (R : Resource.S) : sig
       codebase's history (within one controller, across controllers
       sharing a Manager, and in leader election's own Lease renewal
       traffic). Cloning internally instead removes the parameter a caller
-      could get wrong in the first place. *)
+      could get wrong in the first place.
+
+      [watch_timeout_seconds], if given, is forwarded as the WATCH
+      request's [timeoutSeconds] query param (see {!Client.watch}): the
+      API server then closes the stream on that cadence, which [run] treats
+      as a routine re-list, giving a predictable resync interval that also
+      doubles as a liveness check on the connection. *)
 
   val cache : t -> R.t Cache.t
 

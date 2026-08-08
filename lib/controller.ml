@@ -28,7 +28,7 @@ module Make (Rec : Reconciler.S) = struct
      unlabelled blob mixing every controller's numbers together. *)
   let metric_labels = [ "kind", Rec.R.gvk.kind; "group_version", Gvk.api_version Rec.R.gvk ]
 
-  let create ~ctx ~env ~clock ?namespace ?label_selector ?(workers = 1) () : t =
+  let create ~ctx ~env ~clock ?namespace ?label_selector ?owns ?(workers = 1) () : t =
     let cache_ref : Rec.R.t Cache.t option ref = ref None in
     let start ~sw =
       let wq = Workqueue.create ~sw ~clock () in
@@ -38,6 +38,26 @@ module Make (Rec : Reconciler.S) = struct
       let cache = Rf.cache reflector in
       cache_ref := Some cache;
       Cache.wait_for_sync cache;
+      (* Secondary-resource watches: for each [?owns] child Kind, run a
+         reflector whose events are mapped back onto the *primary*
+         workqueue via the child's owner -> primary request function. This
+         is what reconciles an owner when its child changes (deleted,
+         drifted, ...) even though the primary Kind itself didn't move. A
+         [None] from [map] (a child we don't own) is skipped. *)
+      (match owns with
+       | None -> ()
+       | Some secondaries ->
+         List.iter
+           (fun (module S : Secondary.S) ->
+             let on_secondary (ev : S.R.t Watch_event.t) =
+               match S.map ev.Watch_event.object_ with
+               | None -> ()
+               | Some req -> Workqueue.add wq req
+             in
+             let module Srf = Reflector.Make (S.R) in
+             let rf = Srf.create ~ctx ~env ?namespace ?label_selector ~on_event:on_secondary () in
+             Eio.Fiber.fork ~sw (fun () -> Srf.run ~sw rf))
+           secondaries);
       let metrics = Context.metrics ctx in
       Eio.Fiber.fork ~sw (fun () ->
         (* A queue depth gauge has no natural "event" to hang off of the

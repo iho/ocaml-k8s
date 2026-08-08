@@ -120,9 +120,12 @@ reconciler with no CRD YAML, since there's no schema to hand-write.
   a `Workqueue` around your reconciler, running `workers` worker fibers.
   Applies the reconciler's requested status write itself; if that PUT hits
   a 409 conflict it refetches the object from the API server and retries
-  once before falling back to a backoff requeue. Emits Prometheus-shaped
-  metrics on every reconcile regardless of whether anything's listening
-  (see "Metrics").
+  once before falling back to a backoff requeue. An optional `~owns` list
+  of `Secondary.S` runs extra reflectors over child Kinds, mapping child
+  events back onto the primary's reconcile key (so a child that's deleted
+  or drifts reconciles its owner). Emits Prometheus-shaped metrics on
+  every reconcile regardless of whether anything's listening (see
+  "Metrics").
 - **`Manager`** — aggregates controllers for different Kinds under one
   SIGINT/SIGTERM handler, with `with_leader_election` for active/standby
   HA via a `coordination.k8s.io/v1` Lease.
@@ -133,11 +136,15 @@ reconciler with no CRD YAML, since there's no schema to hand-write.
   LIST/WATCH/GET/CREATE/UPDATE/DELETE/PATCH/UPDATE-STATUS for any
   `Resource.S` — `DELETE` takes an optional `resourceVersion` precondition
   (a 409-guarded delete), `PATCH` is RFC 7386 merge-patch for touching a
-  subset of an object without a full-object PUT. A caller only ever builds
-  *one* `Client.t`, no matter how many controllers or a leader-election
-  loop share it — `Reflector`/`Controller` each open their own dedicated
+  subset of an object without a full-object PUT, `with_retry` wraps any
+  operation to retry transient failures (transport errors and 5xx) with
+  exponential backoff, and `create` accepts `client_cert`/`client_key` for
+  mutual-TLS auth against the API server. A caller only ever builds *one*
+  `Client.t`, no matter how many controllers or a leader-election loop
+  share it — `Reflector`/`Controller` each open their own dedicated
   connection internally via `Client.clone`, so a long-lived WATCH can never
-  starve other traffic sharing the same connection.
+  starve other traffic sharing the same connection. WATCH requests accept
+  an optional `timeoutSeconds` for a predictable re-list cadence.
 
 ## Features
 
@@ -162,6 +169,13 @@ reconciler with no CRD YAML, since there's no schema to hand-write.
   `/healthz`/`/readyz`; readiness includes every registered controller's
   cache-sync state and current leadership (if `with_leader_election` is
   used) automatically, with no caller code required.
+- **Event recording** — `Event.Recorder` emits typed `core/v1` Events
+  (Normal/Warning, `reason`/`message`) on any involved object, so operator
+  activity shows up in `kubectl describe` / `kubectl get events` — the
+  client-go EventRecorder complement to the Prometheus metrics.
+- **Secondary-resource watches** — `Controller.Make` takes an `~owns` list
+  of `Secondary.S` to run extra reflectors over child Kinds, mapping child
+  events back onto the primary's reconcile key.
 
 ## Generators
 
@@ -313,9 +327,6 @@ each piece is built, not by an automated E2E suite.
 
 ## Known limitations
 
-- No secondary-resource watches — mapping a child object's events back
-  to its owner's reconcile key. `bin/owned_child_demo.ml` shows the
-  owner-reference pattern by hand instead.
 - `Leader_election`'s renew loop treats any renewal failure (a network
   blip or a real loss) the same, conservatively — the practical effect
   is giving up leadership as fast as the strictest interpretation would.
@@ -329,3 +340,8 @@ each piece is built, not by an automated E2E suite.
   assuming the write would land. A 409 *conflict* is handled specially
   (one refetch-and-retry, see "Core concepts"); this limitation is about
   the other failure classes.
+- The `Event.Recorder` emits fresh Events (deduplicated by Kubernetes on
+  source/involvedObject/reason/message) but does not itself aggregate a
+  repeated reason into a single Event with a bumped `count` the way
+  client-go's recorder does before it hits the server — repeated calls
+  create repeated Events that Kubernetes' own dedup then collapses.

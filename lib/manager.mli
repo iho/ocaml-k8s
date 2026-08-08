@@ -8,13 +8,18 @@ type t
 val create : ctx:Context.t -> unit -> t
 val add_controller : t -> Controller.t -> unit
 
-val run : sw:Eio.Switch.t -> t -> unit
+val run : sw:Eio.Switch.t -> t -> unit Eio.Promise.t
 (** Installs SIGINT/SIGTERM handlers that [Switch.fail sw Exit] (the same
     mechanism verified by hand — [kill -INT] — against [bin/main.ml] and
     the other demo binaries, centralised here instead of duplicated in
     every [main]), forks every registered controller onto [sw], and
     returns immediately — same "fork, then let the enclosing Switch.run
-    block" pattern as [Controller.run].
+    block" pattern as [Controller.run]. Returns a [unit Promise.t] that
+    resolves when [sw] is released (normal completion, or [Exit] from
+    this manager's own signal handlers, or
+    {!Leader_election.Leadership_lost}), so a caller can [await] the
+    manager's lifetime if they want it as a value rather than implicitly
+    via the enclosing [Switch.run].
 
     [sw] must be the *same* switch used to build the [Client] backing
     every controller's [Context] (i.e. the [~sw] passed to

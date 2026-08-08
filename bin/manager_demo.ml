@@ -98,5 +98,5 @@ let () =
       Manager.add_readiness_check manager ~name:"warmup" (fun () -> !warmed_up);
       Manager.serve_health ~sw env manager ~port:8080;
       traceln "-- serving http://127.0.0.1:8080/healthz and /readyz --";
-      Manager.run ~sw manager
+      ignore (Manager.run ~sw manager)
   with Exit -> traceln "stopped."

@@ -14,6 +14,17 @@ module Error = struct
         (match s.message with Some m -> ": " ^ m | None -> "")
     | Http s -> s
     | Decode s -> "decode error: " ^ s
+
+  (* [true] for failures retrying has a reasonable chance of fixing: a
+     transport/connection error (the request may never have reached the
+     server) or a server-side 5xx. [false] for a definitive 4xx rejection
+     (retrying cannot change it, and for a [DeleteOptions]-preconditioned
+     DELETE would be actively wrong) and for [Gone]/[Decode], which callers
+     handle specially. {!Client.with_retry} uses this. *)
+  let is_transient = function
+    | Http _ -> true
+    | Api_error s -> (match s.code with Some c when c >= 500 -> true | _ -> false)
+    | Gone _ | Decode _ -> false
 end
 
 (* Every non-2xx response's body, in practice, is a meta/v1.Status object
@@ -37,6 +48,8 @@ type t =
   ; headers : (string * string) list
   ; base_url : string
   ; ca_cert : Piaf.Cert.t option
+  ; client_cert : Piaf.Cert.t option
+  ; client_key : Piaf.Cert.t option
   ; insecure : bool
   }
 
@@ -69,8 +82,18 @@ let in_cluster_config () =
       , (if Sys.file_exists ca_path then Some (Piaf.Cert.Filepath ca_path) else None) )
   | _ -> None
 
-let connect ~sw env ~base_url ~headers ~ca_cert ~insecure =
-  let config = { Piaf.Config.default with cacert = ca_cert; allow_insecure = insecure } in
+let connect ~sw env ~base_url ~headers ~ca_cert ~client_cert ~client_key ~insecure =
+  let clientcert =
+    match client_cert, client_key with
+    | Some cert, Some key -> Some (cert, key)
+    | _ -> None
+  in
+  let config =
+    { Piaf.Config.default with
+      cacert = ca_cert;
+      clientcert;
+      allow_insecure = insecure }
+  in
   match Piaf.Client.create ~config ~sw env (Uri.of_string base_url) with
   | Error e -> Error (Error.Http (Piaf.Error.to_string e))
   | Ok piaf ->
@@ -85,16 +108,16 @@ let connect ~sw env ~base_url ~headers ~ca_cert ~insecure =
          if it doesn't close promptly. *)
       try Eio.Time.with_timeout_exn env#clock 3.0 (fun () -> Piaf.Client.shutdown piaf) with
       | Eio.Time.Timeout -> ());
-    Ok { piaf; headers; base_url; ca_cert; insecure }
+    Ok { piaf; headers; base_url; ca_cert; client_cert; client_key; insecure }
 
-let create ~sw env ~base_url ?token ?ca_cert ?(insecure = false) () =
+let create ~sw env ~base_url ?token ?ca_cert ?client_cert ?client_key ?(insecure = false) () =
   let headers =
     ("accept", "application/json")
     :: (match token with
         | Some tok -> [ "authorization", "Bearer " ^ tok ]
         | None -> [])
   in
-  connect ~sw env ~base_url ~headers ~ca_cert ~insecure
+  connect ~sw env ~base_url ~headers ~ca_cert ~client_cert ~client_key ~insecure
 
 let of_env ~sw env =
   match in_cluster_config () with
@@ -104,7 +127,9 @@ let of_env ~sw env =
        on 127.0.0.1:8001, so no token/TLS is required by default. *)
     create ~sw env ~base_url:"http://127.0.0.1:8001" ()
 
-let clone ~sw env t = connect ~sw env ~base_url:t.base_url ~headers:t.headers ~ca_cert:t.ca_cert ~insecure:t.insecure
+let clone ~sw env t =
+  connect ~sw env ~base_url:t.base_url ~headers:t.headers ~ca_cert:t.ca_cert ~client_cert:t.client_cert
+    ~client_key:t.client_key ~insecure:t.insecure
 
 let shutdown t = Piaf.Client.shutdown t.piaf
 
@@ -122,10 +147,11 @@ let rest_path (type a) (module R : Resource.S with type t = a) ~namespace =
   | Some ns, true -> Printf.sprintf "%s/namespaces/%s/%s" base ns R.plural
   | _ -> Printf.sprintf "%s/%s" base R.plural
 
-let query_params ?label_selector ?field_selector ?(watch = false) ?resource_version () =
+let query_params ?label_selector ?field_selector ?timeout_seconds ?(watch = false) ?resource_version () =
   List.filter_map Fun.id
     [ Option.map (fun s -> "labelSelector", s) label_selector
     ; Option.map (fun s -> "fieldSelector", s) field_selector
+    ; Option.map (fun t -> "timeoutSeconds", string_of_int t) timeout_seconds
     ; (if watch then Some ("watch", "1") else None)
     ; (if watch then Some ("allowWatchBookmarks", "true") else None)
     ; Option.map (fun rv -> "resourceVersion", rv) resource_version
@@ -188,11 +214,11 @@ let line_splitter ~f =
       List.iter (fun line -> if String.length line > 0 then f line) (List.rev complete_lines_rev)
 
 let watch (type a) t ~resource:(module R : Resource.S with type t = a) ?namespace ?label_selector
-  ?field_selector ~resource_version ~on_event () =
+  ?field_selector ?timeout_seconds ~resource_version ~on_event () =
   let path =
     target
       ~path:(rest_path (module R) ~namespace)
-      ~params:(query_params ?label_selector ?field_selector ~watch:true ~resource_version ())
+      ~params:(query_params ?label_selector ?field_selector ?timeout_seconds ~watch:true ~resource_version ())
   in
   match Piaf.Client.get t.piaf ~headers:t.headers path with
   | Error e -> Error (Error.Http (Piaf.Error.to_string e))
@@ -298,8 +324,35 @@ let update t ~resource obj = put_object t ~resource ~subresource:None obj
 let update_status t ~resource obj = put_object t ~resource ~subresource:(Some "status") obj
 
 (* ---------------------------------------------------------------------- *)
-(* DELETE                                                                 *)
+(* Retry (for callers)                                                    *)
 (* ---------------------------------------------------------------------- *)
+
+(* [with_retry ~sleep ~base_delay ~max_delay ~max_attempts f] runs [f ()]
+   (any single [Client] operation that returns [('a, Error.t) result]),
+   retrying on a {!Error.is_transient} failure with capped exponential
+   backoff (the same scheme the Reflector and Workqueue already use), up to
+   [max_attempts] total tries. A non-transient error, or the final attempt
+   failing, is returned as-is. [sleep] is the caller's [Context.sleep]
+   (they hold the [Context.t]/clock; [Client] deliberately doesn't store
+   one). This exists so a reconciler calling the low-level client directly
+   (a [Client.get] or [Client.update] against [Context.client ctx]) can get
+   the same retry-on-transient-failure behaviour the Reflector/Controller
+   layers already give the machinery, without threading backoff through
+   every caller. Reads (LIST/GET/WATCH) are naturally safe to retry; a
+   caller should only wrap a write (PUT/PATCH/DELETE) if its own idempotence
+   guarantees make a re-send safe. *)
+let with_retry ?(max_attempts = 3) ?(base_delay = 0.1) ?(max_delay = 30.0) ~sleep f =
+  let rec go attempt delay =
+    match f () with
+    | Ok _ as ok -> ok
+    | Error e ->
+      if Error.is_transient e && attempt < max_attempts
+      then (
+        sleep delay;
+        go (attempt + 1) (Float.min max_delay (delay *. 2.0)))
+      else Error e
+  in
+  go 1 base_delay
 
 let delete (type a) t ~resource:(module R : Resource.S with type t = a) ?namespace ~name ?resource_version () =
   let path = Printf.sprintf "%s/%s" (rest_path (module R) ~namespace) name in

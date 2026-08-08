@@ -33,6 +33,7 @@ module Make (Rec : Reconciler.S) : sig
     -> clock:_ Eio.Time.clock
     -> ?namespace:string
     -> ?label_selector:string
+    -> ?owns:(module Secondary.S) list
     -> ?workers:int (** default 1 *)
     -> unit
     -> t
@@ -43,6 +44,15 @@ module Make (Rec : Reconciler.S) : sig
       ad-hoc calls (e.g. via {!Finalizer}) without any risk of it starving
       behind this controller's own WATCH — they're now always different
       connections, structurally, not just by the caller's discipline.
+
+      [?owns] declares secondary (child) Kinds this controller creates and
+      therefore needs to reconcile its primary on changes to. For each
+      {!Secondary.S} in the list, the controller runs an extra reflector
+      whose events are mapped back to the primary's workqueue via that
+      secondary's [map] (which should return the owning primary's
+      [Request.t], or [None] for children this controller doesn't own).
+      Without this, a child that is deleted or drifts is never noticed,
+      because the primary Kind didn't move — see {!Secondary}.
 
       [clock] is needed only to build this controller's [Workqueue] (its
       [add_after]/[add_rate_limited] timers) — it can't be recovered from

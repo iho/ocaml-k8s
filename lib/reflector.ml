@@ -5,12 +5,13 @@ module Make (R : Resource.S) = struct
     ; namespace : string option
     ; label_selector : string option
     ; field_selector : string option
+    ; watch_timeout_seconds : int option
     ; on_event : R.t Watch_event.t -> unit
     ; cache : R.t Cache.t
     }
 
-  let create ~ctx ~env ?namespace ?label_selector ?field_selector ~on_event () =
-    { ctx; env; namespace; label_selector; field_selector; on_event; cache = Cache.create () }
+  let create ~ctx ~env ?namespace ?label_selector ?field_selector ?watch_timeout_seconds ~on_event () =
+    { ctx; env; namespace; label_selector; field_selector; watch_timeout_seconds; on_event; cache = Cache.create () }
 
   let cache t = t.cache
 
@@ -97,7 +98,7 @@ module Make (R : Resource.S) = struct
     and watch_from resource_version =
       match
         Client.watch client ~resource:(module R) ?namespace:t.namespace ?label_selector:t.label_selector
-          ?field_selector:t.field_selector ~resource_version ~on_event:on_watch_event ()
+          ?field_selector:t.field_selector ?timeout_seconds:t.watch_timeout_seconds ~resource_version ~on_event:on_watch_event ()
       with
       | Ok () ->
         Context.log t.ctx "reflector[%s]: watch stream closed, re-listing" (Gvk.to_string R.gvk);
