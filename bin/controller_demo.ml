@@ -50,10 +50,7 @@ let () =
     | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
     | Ok client ->
       let ctx = Context.create ~sw ~client ~clock:env#clock () in
-      (* Safe to reuse the same [client] for both here: this reconciler
-         never calls [Context.client] itself (see Controller.Make's doc
-         comment on [~client] for when that would need to be separate). *)
-      let controller = Pod_controller.create ~ctx ~client ~clock:env#clock ?namespace ~workers:2 () in
+      let controller = Pod_controller.create ~ctx ~env ~clock:env#clock ?namespace ~workers:2 () in
       traceln "-- controller starting (2 workers) --";
       Controller.run ~sw controller
   with Exit -> traceln "stopped."

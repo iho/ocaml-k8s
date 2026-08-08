@@ -10,12 +10,12 @@ let run ~sw (t : t) = t.start ~sw
 module Make (Rec : Reconciler.S) = struct
   module Rf = Reflector.Make (Rec.R)
 
-  let create ~ctx ~client ~clock ?namespace ?label_selector ?(workers = 1) () : t =
+  let create ~ctx ~env ~clock ?namespace ?label_selector ?(workers = 1) () : t =
     let start ~sw =
       let wq = Workqueue.create ~sw ~clock () in
       let on_event (ev : Rec.R.t Watch_event.t) = Workqueue.add wq ev.request in
-      let reflector = Rf.create ~ctx ~client ?namespace ?label_selector ~on_event () in
-      Eio.Fiber.fork ~sw (fun () -> Rf.run reflector);
+      let reflector = Rf.create ~ctx ~env ?namespace ?label_selector ~on_event () in
+      Eio.Fiber.fork ~sw (fun () -> Rf.run ~sw reflector);
       Cache.wait_for_sync (Rf.cache reflector);
       let cache = Rf.cache reflector in
       (* Applies a status update, if any, *before* the reconcile's

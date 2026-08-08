@@ -17,24 +17,20 @@ val run : sw:Eio.Switch.t -> t -> unit
 module Make (Rec : Reconciler.S) : sig
   val create :
      ctx:Context.t
-    -> client:Client.t
+    -> env:Eio_unix.Stdenv.base
     -> clock:_ Eio.Time.clock
     -> ?namespace:string
     -> ?label_selector:string
     -> ?workers:int (** default 1 *)
     -> unit
     -> t
-  (** [client] is a *separate* connection dedicated to this controller's
-      own [Reflector] (its LIST+WATCH) — not [Context.client ctx], which
-      [Rec.reconcile] may use itself for status updates (see
-      {!Client.update_status}) or other ad-hoc calls. They must be
-      different connections if [Rec.reconcile] ever does issue its own
-      calls: a WATCH is long-lived, and over an HTTP/1.1 connection
-      anything else sharing it — like a status PUT — queues forever
-      behind it, silently. See {!Reflector.Make}'s [create] for how this
-      was found. If [Rec.reconcile] only ever reads from the cache and
-      never returns [Some status] or otherwise calls [Context.client],
-      it's fine to pass the same [Client.t] as [ctx]'s.
+  (** No [~client] parameter: this controller's [Reflector] opens its own
+      dedicated connection internally (see {!Reflector.Make}'s [create]),
+      cloned from [Context.client ctx] via [env]. [Rec.reconcile] is free
+      to use [Context.client ctx] itself for status updates or other
+      ad-hoc calls (e.g. via {!Finalizer}) without any risk of it starving
+      behind this controller's own WATCH — they're now always different
+      connections, structurally, not just by the caller's discipline.
 
       [clock] is needed only to build this controller's [Workqueue] (its
       [add_after]/[add_rate_limited] timers) — it can't be recovered from

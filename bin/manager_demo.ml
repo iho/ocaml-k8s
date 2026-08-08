@@ -10,20 +10,16 @@
    [try ... with Exit -> ...] around the enclosing [Switch.run], same as
    every other demo here: [Manager.run] takes [~sw] and cancels *that*
    switch rather than owning a private one, specifically so it shares a
-   lifecycle with the [Client]s built on the same [sw] below (see
+   lifecycle with the [Client] built on the same [sw] below (see
    [Manager.run]'s doc comment for the deadlock this avoids).
 
-   Each controller gets its own [Client.t]/[Context.t] here rather than
-   sharing one: a Reflector's WATCH is a long-lived streaming request, and
-   over a single HTTP/1.1 connection (which is what `kubectl proxy` speaks)
-   that starves every *other* controller sharing the connection — their
-   LIST/WATCH calls just queue forever behind the first controller's
-   never-ending watch, with no error or timeout to surface it. This was
-   found by running exactly this demo with one shared client: the second
-   controller silently never printed anything, ever. HTTP/2 (real clusters
-   over TLS) genuinely multiplexes and wouldn't hit this, but one
-   connection per controller avoids the failure mode either way. Both
-   clients still share the *same* [sw], for the reason above. *)
+   Only *one* [Client.t]/[Context.t] here, shared by both controllers:
+   each [Controller.Make(_).create] clones its own dedicated connection
+   for its Reflector internally (see [Controller.Make]'s doc comment), so
+   there's no risk of one controller's long-lived WATCH starving the
+   other's — that used to require the caller to manually build a separate
+   [Client.t] per controller and remember not to mix them up; now it's
+   automatic and there's nothing to get wrong. *)
 
 open Eio
 open K8s
@@ -79,27 +75,13 @@ let () =
   try
     Switch.run
     @@ fun sw ->
-    (* A fresh Client/Context per controller, but the *same* [sw] for
-       both — see the file header comment for both of those choices. *)
-    let new_ctx () =
-      match Client.of_env ~sw env with
-      | Error e -> Error e
-      | Ok client -> Ok (Context.create ~sw ~client ~clock:env#clock ())
-    in
-    match new_ctx (), new_ctx () with
-    | Error e, _ | _, Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
-    | Ok pod_ctx, Ok config_map_ctx ->
-      let manager_ctx = pod_ctx in
-      (* Safe to reuse each controller's own ctx-client as its reflector
-         client too: neither reconciler calls [Context.client] itself. *)
-      let pod_controller =
-        Pod_controller.create ~ctx:pod_ctx ~client:(Context.client pod_ctx) ~clock:env#clock ?namespace ()
-      in
-      let config_map_controller =
-        Config_map_controller.create ~ctx:config_map_ctx ~client:(Context.client config_map_ctx) ~clock:env#clock
-          ?namespace ()
-      in
-      let manager = Manager.create ~ctx:manager_ctx () in
+    match Client.of_env ~sw env with
+    | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
+    | Ok client ->
+      let ctx = Context.create ~sw ~client ~clock:env#clock () in
+      let pod_controller = Pod_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
+      let config_map_controller = Config_map_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
+      let manager = Manager.create ~ctx () in
       Manager.add_controller manager pod_controller;
       Manager.add_controller manager config_map_controller;
       Manager.run ~sw manager

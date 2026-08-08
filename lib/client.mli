@@ -47,6 +47,16 @@ val create :
     automatically via [Switch.on_release sw] — callers do not need to call
     {!shutdown} themselves unless they want to close it early. *)
 
+val clone : sw:Eio.Switch.t -> Eio_unix.Stdenv.base -> t -> (t, Error.t) result
+(** Opens an *independent* connection (a fresh TCP+TLS handshake, not a
+    lightweight operation) with the same [base_url]/auth/TLS settings as
+    [t] — reusing [t]'s already-resolved headers rather than re-reading a
+    token file, so it works the same regardless of whether [t] was built
+    via [of_env] or [create]. [Reflector]/[Controller] call this
+    internally so a caller only ever builds *one* [Client.t]: see their
+    doc comments for the starvation bug this exists to make structurally
+    impossible instead of merely documented against. *)
+
 val shutdown : t -> unit
 
 val list :

@@ -39,20 +39,18 @@ val with_leader_election : t -> Leader_election.config -> t
     renewing) a [coordination.k8s.io/v1] Lease — see {!Leader_election} —
     before starting any registered controller: standard active/passive HA
     for operators, so only one replica acts at a time. Uses [Context.client]
-    of the [ctx] passed to {!create} for the Lease's own GET/PUT/POST calls.
-
-    That client must be dedicated to Manager itself — not also handed to
-    any [Controller.Make(_).create] as its [~client] (a Reflector's own
-    [~ctx] is fine to share, per its own doc comment; its [~client]
-    specifically is not). Getting this wrong doesn't error, it just quietly
-    breaks mutual exclusion: found by running two [leader_demo] candidates
-    against a real Lease with one shared client each — the "leader"'s
-    Lease renewals queued forever behind its own controller's long-lived
-    WATCH on the same HTTP/1.1 connection (the same starvation class
-    documented on {!Reflector.Make}'s [create] and {!Controller.Make}'s
-    [~client], here recurring one level up), so its lease quietly expired
-    within a few seconds and the other candidate legitimately stole it —
-    both then ran as "leader" simultaneously. Two connections fixed it.
+    of the [ctx] passed to {!create} for the Lease's own GET/PUT/POST calls
+    — safe to share with every registered controller's [~ctx] (unlike an
+    earlier version of this library, a controller's own [Reflector] now
+    always clones its own connection rather than accepting a caller-
+    supplied one — see {!Controller.Make}'s [create] — so there's no longer
+    a way for this to accidentally end up sharing a connection with a
+    long-lived WATCH; that used to be a real, silent failure mode here,
+    found by running two [leader_demo] candidates against a real Lease
+    with one shared connection each: the "leader"'s own renewals starved
+    behind its controller's WATCH, its lease quietly expired, and the
+    other candidate legitimately stole it — both then ran as "leader"
+    simultaneously).
 
     If leadership is ever lost after having been acquired,
     {!Leader_election.Leadership_lost} tears down every controller sharing

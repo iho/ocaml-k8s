@@ -16,6 +16,15 @@ from the CRD's own YAML (`gen/gen_resource.ml` + `generated/`,
 `bin/webapp_gen_demo.ml`) — both produce an ordinary module satisfying the
 same signature, and nothing downstream can tell which.
 
+Callers only ever build *one* `Client.t`/`Context.t`, no matter how many
+`Reflector`s/`Controller`s/leader-election loops share it — each opens its
+own dedicated connection internally via `Client.clone` (reusing the
+original's already-resolved auth/TLS settings) rather than requiring the
+caller to build and correctly route a separate `Client.t` per long-lived
+WATCH. That used to be a real, unenforced-by-the-type-system footgun — see
+`Client.clone` in the table below and the "Notes / limitations" history of
+the three connection-starvation bugs it structurally eliminates.
+
 ## Prerequisites
 
 - OCaml >= 5.1, dune >= 3.0
@@ -115,9 +124,9 @@ LIST+WATCH client. Current status per module:
 | `Gvk`, `Request`, `Watch_event`, `Object_meta` | done — `Object_meta` includes `owner_references : Owner_reference.t list` |
 | `Type_meta`, `List_meta`, `Status` | done — `apiVersion`/`kind` read without knowing the Kind, a LIST response's own metadata, and Kubernetes' generic `meta/v1.Status` error-body type, respectively |
 | `Resource` | done — `Resource.S` includes a `status` subresource type (`status_of_json`/`status_to_json`/`status`/`with_status`); `Resource.Unstructured` and typed CRD bindings (hand-written, e.g. `bin/webapp_demo.ml`'s `Web_app`, or generated — see below) all implement it |
-| `Client` | done — LIST/WATCH/`get`/`create_object`/`update`/`update_status` generalised over any `Resource.S`; non-2xx responses are parsed into `Error.Api_error of Status.t` when the body is a Status object (essentially always), not just a formatted string |
+| `Client` | done — LIST/WATCH/`get`/`create_object`/`update`/`update_status` generalised over any `Resource.S`; non-2xx responses are parsed into `Error.Api_error of Status.t` when the body is a Status object (essentially always), not just a formatted string; `Client.clone` opens an independent connection reusing an existing client's auth/TLS settings, so `Reflector`/`Controller` can each get their own dedicated connection without the caller doing anything |
 | `Context`, `Cache` | done |
-| `Reflector` | done — List-then-Watch-forever, full resync-as-sync-events on every (re)LIST (incl. on 410/dropped connection) with capped exponential backoff; see `bin/reflector_demo.ml` |
+| `Reflector` | done — List-then-Watch-forever, full resync-as-sync-events on every (re)LIST (incl. on 410/dropped connection) with capped exponential backoff; opens its own connection via `Client.clone` rather than taking a caller-supplied `~client`, so it can never accidentally share a connection with anything else; see `bin/reflector_demo.ml` |
 | `Workqueue` | done — `Eio.Mutex`/`Eio.Condition`-backed dedup queue + per-item exponential backoff; see `test/test_workqueue.ml` |
 | `Reconcile_result`, `Reconcile_error`, `Reconciler` | done — `Reconciler.S` bundles a `Resource.S` (`module R`) with a `reconcile : Context.t -> Request.t -> R.t option -> (R.status Reconcile_result.t, Reconcile_error.t) result`, so `Controller.Make` takes one functor argument. `Reconcile_error.of_client_error` maps a `Client.Error.t` to `Conflict` iff it's a real 409 (via `Status.is_conflict`), making that case reachable for the first time instead of dead code |
 | `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.S`, N worker fibers, status-subresource PUTs; see `bin/controller_demo.ml` (untyped/`Unstructured`) and `bin/webapp_demo.ml` (typed CRD, real status update) |
@@ -270,18 +279,26 @@ version — see "Manual verification" below.
   once `bin/controller_demo.ml` was Ctrl-C'd against a real cluster; a
   regression test (`test_cancel_while_blocked_in_get_does_not_poison`) was
   added and confirmed to fail against the old code before the fix.
-- Registering multiple controllers against the same `kubectl proxy`
-  (HTTP/1.1) endpoint needs a separate `Client`/`Context` per controller
-  — see `bin/manager_demo.ml`'s header comment. A Reflector's WATCH is a
-  long-lived streaming request; sharing one HTTP/1.1 connection across
-  controllers means every controller after the first just queues forever
-  behind the first one's never-ending watch, with no error or timeout to
-  surface it. Found by running `manager_demo` with one shared client: the
-  second controller silently never printed anything, ever. Real clusters
-  over TLS negotiate HTTP/2, which genuinely multiplexes and wouldn't hit
-  this, but one connection per controller avoids the failure mode either
-  way — and avoids one connection's traffic being able to affect another's
-  regardless of protocol.
+- **Bug found via end-to-end testing, now fixed structurally**: a
+  Reflector's WATCH is a long-lived streaming request; over `kubectl
+  proxy` (HTTP/1.1), sharing one connection across controllers means every
+  controller after the first just queues forever behind the first one's
+  never-ending watch, with no error or timeout to surface it. First found
+  by running `manager_demo` with one shared client: the second controller
+  silently never printed anything, ever. Real clusters over TLS negotiate
+  HTTP/2, which genuinely multiplexes and wouldn't hit this, but one
+  connection per controller avoids the failure mode either way — and
+  avoids one connection's traffic being able to affect another's
+  regardless of protocol. The original fix required each caller to
+  manually build and correctly route a *separate* `Client`/`Context` per
+  controller — unenforced by the type system, and the direct cause of two
+  more bugs below recurring in different shapes. Superseded: `Reflector`
+  now opens its own dedicated connection internally via `Client.clone`
+  (see the intro and the `Client`/`Reflector` rows above), so a caller
+  only ever builds one `Client.t` and there is no longer a `~client`
+  parameter to get wrong. `bin/manager_demo.ml` now shares a single
+  `Client`/`Context` across both its controllers — see "Manual
+  verification" below for the re-test confirming this.
 - **Bug found via end-to-end testing, now fixed — a real deadlock**:
   `Manager.run` originally took no `~sw` and created its own private
   `Switch` for the controllers, specifically so it could fully own
@@ -330,18 +347,24 @@ version — see "Manual verification" below.
   occupies the connection forever, so the reconciler's status PUT — issued
   from a different fiber on the same connection — queues behind it and
   never gets a turn. No error, no timeout, just silence, same signature as
-  the earlier bug. Fixed by giving `Reflector.Make(R).create` (and, in
-  turn, `Controller.Make(Rec).create`) its own `~client` parameter,
-  explicitly separate from `Context.client ctx`. Verified for real:
-  reset a live `WebApp`'s status to a wrong value via `kubectl patch
-  --subresource=status`, ran `webapp_demo`, and confirmed via `kubectl
-  get webapp ... -o jsonpath='{.status}'` that the program's own PUT
-  corrected it — not a previous manual test's leftover state, which was
-  ruled out by resetting first. Also confirmed the watch picking up the
-  program's own status PUT as a MODIFIED event correctly converges (a
-  second, no-op reconcile logging "already correct") instead of
-  self-triggering forever, and that Ctrl-C still cleanly closes both
-  connections (~1s exit).
+  the earlier bug. Originally fixed by giving `Reflector.Make(R).create`
+  (and, in turn, `Controller.Make(Rec).create`) its own `~client`
+  parameter, explicitly separate from `Context.client ctx` — verified for
+  real at the time: reset a live `WebApp`'s status to a wrong value via
+  `kubectl patch --subresource=status`, ran `webapp_demo`, and confirmed
+  via `kubectl get webapp ... -o jsonpath='{.status}'` that the program's
+  own PUT corrected it, that the watch picking up the program's own status
+  PUT as a MODIFIED event converged instead of self-triggering forever,
+  and that Ctrl-C still cleanly closed both connections (~1s exit). That
+  `~client` parameter was itself the footgun, though: nothing stopped a
+  caller from passing the *same* `Client.t` for both, which is exactly
+  what happened one level up in the leader-election bug just below.
+  Superseded: `Reflector`/`Controller` now clone their own connection
+  internally (see the intro above), so `bin/webapp_demo.ml` and
+  `bin/webapp_gen_demo.ml` now build and pass around a single `Client.t`
+  — re-verified against a real cluster with the same finalizer-add,
+  status-PUT, and finalizer-delete-and-gone scenarios; see "Manual
+  verification" below.
 - `Leader_election`'s renew loop treats *any* renewal failure the same,
   whether it's a network error or another identity having legitimately
   won a race — both just count toward the `lease_duration` failure
@@ -378,11 +401,25 @@ version — see "Manual verification" below.
   candidate legitimately (and correctly, given what it could observe)
   stole it. Not a bug in the election algorithm itself — confirmed by the
   Lease's own `leaseTransitions` field incrementing exactly once, exactly
-  when expected, both times. Fixed by giving the demo's `Manager`/
-  `Leader_election` traffic and its controller's `Reflector` separate
-  connections, same rule as everywhere else. `Manager.with_leader_election`'s
-  doc comment now says this explicitly, since getting it wrong doesn't
-  raise an error — it just quietly breaks mutual exclusion.
+  when expected, both times. This was the third occurrence of the same
+  connection-sharing footgun in three different shapes (multi-controller,
+  within-a-controller, and now leader-election-vs-its-own-controller),
+  which is what motivated eliminating the footgun itself rather than
+  fixing it a fourth time: originally fixed by giving the demo's
+  `Manager`/`Leader_election` traffic and its controller's `Reflector`
+  separate connections, the same manual per-caller discipline as the two
+  bugs above — since it was still just a rule to remember, not something
+  the type system enforced, getting it wrong wouldn't raise an error, it
+  would just quietly break mutual exclusion again. Superseded:
+  `Reflector`/`Controller` now clone their own connection internally via
+  `Client.clone`, so `Leader_election`'s renewal traffic can safely share
+  `ctx`'s client with everything else — `bin/leader_demo.ml` now builds
+  just one `Client.t`. Re-verified against a real cluster: two candidates'
+  lease `renewTime` advances normally while each holds leadership (proving
+  its own renewals aren't starved behind its controller's watch), and
+  `kill -9`ing the active leader produces a single clean
+  `leaseTransitions` increment to the standby, not a double-leader state;
+  see "Manual verification" below.
 
 ## Manual verification
 
@@ -413,11 +450,12 @@ multiple times as the library grew:
   surfaced the `Workqueue.get` mutex-poisoning bug described above; fixed,
   and re-verified clean (exit 0) across several repeated Ctrl-C runs.
 - **`Manager`**: `bin/manager_demo.ml` (Pods + ConfigMaps controllers,
-  each with its own `Client`/`Context`, both created and reconciled all
-  8+9 pre-existing objects at startup correctly) — this is where both the
-  HTTP/1.1 connection-sharing starvation bug and the private-switch
-  shutdown deadlock described above were found and fixed. Re-verified
-  clean (~1s to exit) across 6 repeated Ctrl-C runs after both fixes.
+  originally each with its own `Client`/`Context`, both created and
+  reconciled all 8+9 pre-existing objects at startup correctly) — this is
+  where both the HTTP/1.1 connection-sharing starvation bug and the
+  private-switch shutdown deadlock described above were found and fixed.
+  Re-verified clean (~1s to exit) across 6 repeated Ctrl-C runs after both
+  fixes.
 - **Typed CRDs / status updates**: `examples/webapp-crd.yaml` (a
   `WebApp` CRD with a `/status` subresource enabled) and
   `examples/webapp-sample.yaml` applied to a real cluster, then
@@ -482,3 +520,24 @@ multiple times as the library grew:
   isolated, non-generator throwaway before trusting it in the generator's
   own output, and confirmed clean Ctrl-C shutdown of the generated-module
   demo (~1s, two connections, same as `webapp_demo.ml`).
+- **`Client.clone` / single-client demos**: after collapsing every demo
+  down to one `Client.t`, all of the above was re-run end-to-end against a
+  fresh cluster to confirm `Client.clone` genuinely eliminates the
+  connection-sharing footgun rather than just hiding it. `manager_demo`
+  (the demo that originally *proved* the cross-controller starvation bug)
+  synced and reconciled both controllers' pre-existing objects fully and
+  concurrently from one shared client. `webapp_demo`/`webapp_gen_demo`
+  each completed the full finalizer-add → status-PUT → delete →
+  finalizer-remove → gone cycle with one client. `leader_demo` (the
+  highest-priority re-test, being the scenario the fix's motivating "wart"
+  writeup named directly) ran two candidates against a real Lease with one
+  client each: `renewTime` advanced normally for the whole time
+  candidate-a held leadership, proving its own renewals weren't starved
+  behind its controller's watch; `kill -9`ing it produced a clean
+  single-transition (`leaseTransitions=1`) handover to candidate-b, not
+  the old double-leader failure. Every demo (`reflector_demo`,
+  `controller_demo`, `manager_demo`, `webapp_demo`, `webapp_gen_demo`,
+  `leader_demo`) also re-confirmed clean SIGINT shutdown (exit code 0)
+  under the single-client design, and `bin/main.ml` (unaffected by this
+  refactor, since it never used `Reflector`/`Controller`) was sanity
+  checked to still LIST+WATCH correctly.

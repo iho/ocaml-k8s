@@ -35,6 +35,9 @@ let error_of_response piaf_status body =
 type t =
   { piaf : Piaf.Client.t
   ; headers : (string * string) list
+  ; base_url : string
+  ; ca_cert : Piaf.Cert.t option
+  ; insecure : bool
   }
 
 let read_file_opt path =
@@ -66,13 +69,7 @@ let in_cluster_config () =
       , (if Sys.file_exists ca_path then Some (Piaf.Cert.Filepath ca_path) else None) )
   | _ -> None
 
-let create ~sw env ~base_url ?token ?ca_cert ?(insecure = false) () =
-  let headers =
-    ("accept", "application/json")
-    :: (match token with
-        | Some tok -> [ "authorization", "Bearer " ^ tok ]
-        | None -> [])
-  in
+let connect ~sw env ~base_url ~headers ~ca_cert ~insecure =
   let config = { Piaf.Config.default with cacert = ca_cert; allow_insecure = insecure } in
   match Piaf.Client.create ~config ~sw env (Uri.of_string base_url) with
   | Error e -> Error (Error.Http (Piaf.Error.to_string e))
@@ -88,7 +85,16 @@ let create ~sw env ~base_url ?token ?ca_cert ?(insecure = false) () =
          if it doesn't close promptly. *)
       try Eio.Time.with_timeout_exn env#clock 3.0 (fun () -> Piaf.Client.shutdown piaf) with
       | Eio.Time.Timeout -> ());
-    Ok { piaf; headers }
+    Ok { piaf; headers; base_url; ca_cert; insecure }
+
+let create ~sw env ~base_url ?token ?ca_cert ?(insecure = false) () =
+  let headers =
+    ("accept", "application/json")
+    :: (match token with
+        | Some tok -> [ "authorization", "Bearer " ^ tok ]
+        | None -> [])
+  in
+  connect ~sw env ~base_url ~headers ~ca_cert ~insecure
 
 let of_env ~sw env =
   match in_cluster_config () with
@@ -97,6 +103,8 @@ let of_env ~sw env =
     (* Fall back to `kubectl proxy`, which handles authentication for us
        on 127.0.0.1:8001, so no token/TLS is required by default. *)
     create ~sw env ~base_url:"http://127.0.0.1:8001" ()
+
+let clone ~sw env t = connect ~sw env ~base_url:t.base_url ~headers:t.headers ~ca_cert:t.ca_cert ~insecure:t.insecure
 
 let shutdown t = Piaf.Client.shutdown t.piaf
 

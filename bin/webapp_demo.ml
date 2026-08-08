@@ -158,19 +158,11 @@ let () =
          (fun _ ->
            traceln "received SIGINT, shutting down...";
            Switch.fail sw Exit));
-    (* Two separate connections: this reconciler issues its own status
-       PUTs (via [Context.client ctx]), so it can't share a connection
-       with its own reflector's long-lived WATCH — see Controller.Make's
-       doc comment on [~client] for why (found the hard way: the very
-       first version of this demo hung forever on its own status update,
-       queued behind its own watch on a single HTTP/1.1 connection). *)
-    match Client.of_env ~sw env, Client.of_env ~sw env with
-    | Error e, _ | _, Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
-    | Ok ctx_client, Ok reflector_client ->
-      let ctx = Context.create ~sw ~client:ctx_client ~clock:env#clock () in
-      let controller =
-        Web_app_controller.create ~ctx ~client:reflector_client ~clock:env#clock ?namespace ()
-      in
+    match Client.of_env ~sw env with
+    | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
+    | Ok client ->
+      let ctx = Context.create ~sw ~client ~clock:env#clock () in
+      let controller = Web_app_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
       traceln "-- webapp controller starting --";
       Controller.run ~sw controller
   with Exit -> traceln "stopped."

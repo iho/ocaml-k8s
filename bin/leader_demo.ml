@@ -44,21 +44,11 @@ let () =
   try
     Switch.run
     @@ fun sw ->
-    (* Two separate connections, same rule as everywhere else in this
-       framework: [ctx]'s client carries Manager's own leader-election
-       Lease GET/PUT/POST traffic (short calls, fine to keep dedicated but
-       otherwise idle), while the controller's Reflector gets its own,
-       since its WATCH is long-lived and would otherwise starve the Lease
-       renewals sharing its connection — found exactly that way: the first
-       version of this demo shared one client for both, and the "leader"
-       lost its own lease to the other candidate within a couple of
-       seconds because its renewals never got a turn once its Reflector's
-       WATCH started hogging the only connection. *)
-    match Client.of_env ~sw env, Client.of_env ~sw env with
-    | Error e, _ | _, Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
-    | Ok ctx_client, Ok reflector_client ->
-      let ctx = Context.create ~sw ~client:ctx_client ~clock:env#clock () in
-      let controller = Pod_controller.create ~ctx ~client:reflector_client ~clock:env#clock ?namespace () in
+    match Client.of_env ~sw env with
+    | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
+    | Ok client ->
+      let ctx = Context.create ~sw ~client ~clock:env#clock () in
+      let controller = Pod_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
       let config =
         Leader_election.default_config ~lease_name:"leader-demo" ~lease_namespace ~identity ~lease_duration:5.0
           ~retry_period:1.0 ()

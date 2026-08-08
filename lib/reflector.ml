@@ -1,7 +1,7 @@
 module Make (R : Resource.S) = struct
   type t =
     { ctx : Context.t
-    ; client : Client.t
+    ; env : Eio_unix.Stdenv.base
     ; namespace : string option
     ; label_selector : string option
     ; field_selector : string option
@@ -9,8 +9,8 @@ module Make (R : Resource.S) = struct
     ; cache : R.t Cache.t
     }
 
-  let create ~ctx ~client ?namespace ?label_selector ?field_selector ~on_event () =
-    { ctx; client; namespace; label_selector; field_selector; on_event; cache = Cache.create () }
+  let create ~ctx ~env ?namespace ?label_selector ?field_selector ~on_event () =
+    { ctx; env; namespace; label_selector; field_selector; on_event; cache = Cache.create () }
 
   let cache t = t.cache
 
@@ -18,12 +18,30 @@ module Make (R : Resource.S) = struct
 
   let max_backoff = 30.0
 
-  let run (t : t) =
+  let run ~sw (t : t) =
     let backoff = ref 0.5 in
     let sleep_backoff () =
       Context.sleep t.ctx !backoff;
       backoff := Float.min max_backoff (!backoff *. 2.0)
     in
+    (* A dedicated connection, independent of [Context.client t.ctx] (used
+       for ad-hoc calls elsewhere — status updates, finalizers, leader
+       election) and of every other Reflector's own connection: a WATCH is
+       long-lived, and anything else sharing its connection would queue
+       forever behind it. Patient, like every other connectivity failure
+       here: retried with the same backoff as LIST/WATCH failures below,
+       never gives up. *)
+    let rec connect () =
+      match Client.clone ~sw t.env (Context.client t.ctx) with
+      | Ok client -> client
+      | Error e ->
+        Context.log t.ctx "reflector[%s]: failed to open a dedicated connection: %s" (Gvk.to_string R.gvk)
+          (Client.Error.to_string e);
+        sleep_backoff ();
+        connect ()
+    in
+    let client = connect () in
+    backoff := 0.5;
     let on_watch_event (ev : R.t Watch_event.t) =
       (match ev.kind with
        | Added | Modified -> Cache.Writer.set t.cache ev.request ev.object_
@@ -33,8 +51,8 @@ module Make (R : Resource.S) = struct
     in
     let rec list_and_watch () =
       match
-        Client.list t.client ~resource:(module R) ?namespace:t.namespace
-          ?label_selector:t.label_selector ?field_selector:t.field_selector ()
+        Client.list client ~resource:(module R) ?namespace:t.namespace ?label_selector:t.label_selector
+          ?field_selector:t.field_selector ()
       with
       | Error e ->
         Context.log t.ctx "reflector[%s]: LIST failed: %s" (Gvk.to_string R.gvk)
@@ -78,9 +96,8 @@ module Make (R : Resource.S) = struct
         watch_from resource_version
     and watch_from resource_version =
       match
-        Client.watch t.client ~resource:(module R) ?namespace:t.namespace
-          ?label_selector:t.label_selector ?field_selector:t.field_selector ~resource_version
-          ~on_event:on_watch_event ()
+        Client.watch client ~resource:(module R) ?namespace:t.namespace ?label_selector:t.label_selector
+          ?field_selector:t.field_selector ~resource_version ~on_event:on_watch_event ()
       with
       | Ok () ->
         Context.log t.ctx "reflector[%s]: watch stream closed, re-listing" (Gvk.to_string R.gvk);

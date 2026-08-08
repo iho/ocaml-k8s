@@ -67,13 +67,11 @@ let () =
          (fun _ ->
            traceln "received SIGINT, shutting down...";
            Switch.fail sw Exit));
-    match Client.of_env ~sw env, Client.of_env ~sw env with
-    | Error e, _ | _, Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
-    | Ok ctx_client, Ok reflector_client ->
-      let ctx = Context.create ~sw ~client:ctx_client ~clock:env#clock () in
-      let controller =
-        Web_app_controller.create ~ctx ~client:reflector_client ~clock:env#clock ?namespace ()
-      in
+    match Client.of_env ~sw env with
+    | Error e -> traceln "failed to connect: %s" (Client.Error.to_string e)
+    | Ok client ->
+      let ctx = Context.create ~sw ~client ~clock:env#clock () in
+      let controller = Web_app_controller.create ~ctx ~env ~clock:env#clock ?namespace () in
       traceln "-- webapp (generated) controller starting --";
       Controller.run ~sw controller
   with Exit -> traceln "stopped."

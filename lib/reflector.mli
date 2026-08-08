@@ -7,7 +7,7 @@ module Make (R : Resource.S) : sig
 
   val create :
      ctx:Context.t
-    -> client:Client.t
+    -> env:Eio_unix.Stdenv.base
     -> ?namespace:string
     -> ?label_selector:string
     -> ?field_selector:string
@@ -19,22 +19,26 @@ module Make (R : Resource.S) : sig
       after the cache has already been updated — a [Controller] wires this
       to [Workqueue.add].
 
-      [client] is used for this reflector's LIST+WATCH — deliberately a
-      separate parameter from [ctx] (whose [Context.client] a reconciler
-      might use for its own ad-hoc calls, e.g. status updates) rather than
-      implicitly reusing [Context.client ctx]: a WATCH is a long-lived
-      streaming request, and over an HTTP/1.1 connection (e.g.
-      `kubectl proxy`) any other request sharing that connection — like a
-      reconciler's own status PUT — queues forever behind it, with no
-      error or timeout to surface it. Found by exactly that hang, running
-      a reconciler that both watches and PUTs status over one shared
-      connection. Pass [ctx]'s own client here only if nothing using [ctx]
-      ever issues its own API calls (e.g. never writes a status). *)
+      No [~client] parameter: [run] opens its own, via {!Client.clone} on
+      [Context.client ctx]. Earlier versions of this took a caller-
+      supplied [~client] instead, on the reasoning that a WATCH is
+      long-lived and anything else sharing its connection (e.g. a
+      reconciler's own status PUT, issued via [Context.client ctx])
+      queues forever behind it — true, but that just turned "pass two
+      *different* [Client.t] values, always, with nothing checking you
+      did" into a footgun that caused three separate bugs across this
+      codebase's history (within one controller, across controllers
+      sharing a Manager, and in leader election's own Lease renewal
+      traffic). Cloning internally instead removes the parameter a caller
+      could get wrong in the first place. *)
 
   val cache : t -> R.t Cache.t
 
-  val run : t -> unit
-  (** Runs LIST-then-WATCH inline in the calling fiber, forever:
+  val run : sw:Eio.Switch.t -> t -> unit
+  (** Opens a dedicated connection (via {!Client.clone}; retried patiently
+      with backoff, same as any other connectivity failure here, if it
+      fails), then runs LIST-then-WATCH inline in the calling fiber,
+      forever:
       - LIST populates the cache (via [Cache.Writer.replace_all], so
         objects that disappeared during a disconnection are actually
         dropped, not left stale) and resolves [Cache.wait_for_sync].
@@ -45,11 +49,11 @@ module Make (R : Resource.S) : sig
         and re-LIST — a Reflector's job is to *stay* synced, not to give
         up.
 
-      No [~sw] parameter: this never forks a sub-fiber, so — unlike
-      {!Controller.run}/{!Manager.run} — it needs no [Switch] of its own.
-      Cancellation flows through Eio's ambient per-fiber context instead;
-      callers make this a background loop with
-      [Fiber.fork ~sw (fun () -> run t)], and cancelling [sw] interrupts
-      whichever blocking call (LIST, WATCH, or the backoff sleep) is in
-      progress. *)
+      [sw] is needed only for {!Client.clone}'s cleanup registration (via
+      [Switch.on_release]) — this still never forks a sub-fiber of its
+      own, so cancellation still flows through Eio's ambient per-fiber
+      context, not through [sw] directly: callers make this a background
+      loop with [Fiber.fork ~sw (fun () -> run ~sw t)], and cancelling
+      [sw] interrupts whichever blocking call (the clone, LIST, WATCH, or
+      a backoff sleep) is in progress. *)
 end
