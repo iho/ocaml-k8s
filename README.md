@@ -67,6 +67,16 @@ found by end-to-end testing, not this suite originally — cancelling a
 fiber while it's blocked in `get` not poisoning the queue's mutex (see
 "Notes / limitations"). Pure — no cluster or network needed.
 
+`test/test_reconciler.ml` demonstrates that a reconciler itself (`Context.t
+-> Request.t -> R.t option -> result`) is directly unit-testable the same
+way: no cluster or `kubectl proxy`, just a bare TCP listener started
+outside Eio purely so `Client.create`'s eager connect succeeds (nothing
+in the tested reconcile branches ever calls `Context.client`, so that
+listener never receives an actual HTTP request). Covers the exact
+reconciler `gen/scaffold_operator.ml` generates — gone/already-correct/
+needs-update/stale-status — copied verbatim from its template so the test
+and the generator can't drift apart silently.
+
 ## Run
 
 ### Against `kubectl proxy` (easiest way to test locally)
@@ -128,10 +138,10 @@ LIST+WATCH client. Current status per module:
 | `Context`, `Cache` | done |
 | `Reflector` | done — List-then-Watch-forever, full resync-as-sync-events on every (re)LIST (incl. on 410/dropped connection) with capped exponential backoff; opens its own connection via `Client.clone` rather than taking a caller-supplied `~client`, so it can never accidentally share a connection with anything else; see `bin/reflector_demo.ml` |
 | `Workqueue` | done — `Eio.Mutex`/`Eio.Condition`-backed dedup queue + per-item exponential backoff; see `test/test_workqueue.ml` |
-| `Reconcile_result`, `Reconcile_error`, `Reconciler` | done — `Reconciler.S` bundles a `Resource.S` (`module R`) with a `reconcile : Context.t -> Request.t -> R.t option -> (R.status Reconcile_result.t, Reconcile_error.t) result`, so `Controller.Make` takes one functor argument. `Reconcile_error.of_client_error` maps a `Client.Error.t` to `Conflict` iff it's a real 409 (via `Status.is_conflict`), making that case reachable for the first time instead of dead code |
-| `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.S`, N worker fibers, status-subresource PUTs; see `bin/controller_demo.ml` (untyped/`Unstructured`) and `bin/webapp_demo.ml` (typed CRD, real status update) |
+| `Reconcile_result`, `Reconcile_error`, `Reconciler` | done — `Reconciler.S` bundles a `Resource.S` (`module R`) with a `reconcile : Context.t -> Request.t -> R.t option -> (R.status Reconcile_result.t, Reconcile_error.t) result`, so `Controller.Make` takes one functor argument. `Reconcile_error.of_client_error` maps a `Client.Error.t` to `Conflict` iff it's a real 409 (via `Status.is_conflict`), making that case reachable for the first time instead of dead code. `Reconcile_result.requeue_after` reconciles again on a timer independent of watch events — see `bin/periodic_demo.ml`. A reconciler is pure enough to unit-test directly, no cluster needed — see `test/test_reconciler.ml` |
+| `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.S`, N worker fibers, status-subresource PUTs; see `bin/hello_operator.ml` (the minimal quickstart), `bin/controller_demo.ml` (untyped/`Unstructured`, multiple workers), and `bin/webapp_demo.ml` (typed CRD, real status update) |
 | `Manager` | done — multi-controller aggregation, centralised SIGINT/SIGTERM handling, `with_leader_election`; see `bin/manager_demo.ml` and `bin/leader_demo.ml` |
-| `Finalizer` | done — `has`/`add`/`remove`, JSON-level (no `with_finalizers` needed on `Resource.S`); see `bin/webapp_demo.ml` |
+| `Finalizer` | done — `has`/`add`/`remove`, JSON-level (no `with_finalizers` needed on `Resource.S`); see `bin/webapp_demo.ml`. `Owner_reference` is the other half of cleanup — a child object GC'd by Kubernetes itself needs no finalizer at all; see `bin/owned_child_demo.ml` |
 | `Lease`, `Leader_election` | done — typed `coordination.k8s.io/v1` Lease binding + an acquire/steal/renew loop (patient acquire, hard-deadline renew, fails the switch via `Leadership_lost` if renewal can't keep up); see `bin/leader_demo.ml` |
 | `gen/gen_resource.ml` | done — a small, selective CRD-YAML-to-`Resource.S` generator (see "Generating typed CRD bindings" below); `generated/web_app.ml` (built by a dune rule from `examples/webapp-crd.yaml`) and `bin/webapp_gen_demo.ml` prove it's a drop-in replacement for the hand-written `Web_app` |
 | `gen/scaffold_operator.ml` | done — a kubebuilder-init-style generator that writes a whole new, standalone operator project (`dune-project`/`bin/`/`deploy/*.yaml`), not a module to embed in this one (see "Scaffolding a new operator" below) |
@@ -142,14 +152,18 @@ remain future work — stub signatures in `lib/manager.mli`). `bin/main.ml`
 still doesn't use `Reflector`/`Controller`/`Manager` — it calls
 `Client.list`/`Client.watch` directly, same shape as the original
 hardcoded version, just parameterised by `Resource.Unstructured` for Pods
-instead of hand-written paths/JSON decoding. Six separate, minimal demo
-tools exercise the higher layers directly against a real cluster:
+instead of hand-written paths/JSON decoding. Ten separate, minimal demo
+tools exercise the higher layers directly against a real cluster —
+`bin/hello_operator.ml` first, if you just want the smallest complete
+example to start reading from:
 
 ```sh
 kubectl proxy --port=8001 &
+dune exec bin/hello_operator.exe -- kube-system   # the whole stack, in ~20 lines: watch, log, done
 dune exec bin/reflector_demo.exe -- kube-system   # Reflector + Cache only
 dune exec bin/controller_demo.exe -- kube-system  # full Reflector->Workqueue->Reconciler loop, untyped (Unstructured)
 dune exec bin/manager_demo.exe -- kube-system     # two controllers (Pods + ConfigMaps) under one Manager
+dune exec bin/periodic_demo.exe -- kube-system    # Requeue_after: reconciling on a timer, not just on watch events
 
 # typed CRD example, with a real /status subresource update and finalizer
 # (hand-written Web_app -- bin/webapp_gen_demo.exe below is the same thing
@@ -160,6 +174,16 @@ dune exec bin/webapp_demo.exe -- default
 dune exec bin/webapp_gen_demo.exe -- default
 # then, in another shell, while either is running:
 kubectl delete webapp hello-web    # stays "Terminating" until the finalizer is removed
+
+# owned child objects: a reconciler that creates a ConfigMap on behalf of
+# its CR, with an OwnerReference -- no finalizer needed, since Kubernetes'
+# own GC deletes the child once the parent is actually gone:
+kubectl apply -f examples/app-crd.yaml
+kubectl apply -f examples/app-sample.yaml
+dune exec bin/owned_child_demo.exe -- default
+# then, in another shell, while it's running:
+kubectl get configmap hello-app-config -o jsonpath='{.metadata.ownerReferences}'
+kubectl delete app hello-app    # watch the child disappear on its own, no finalizer involved
 
 # leader election: run two instances competing for the same Lease
 dune exec bin/leader_demo.exe -- candidate-a kube-system
@@ -587,3 +611,36 @@ multiple times as the library grew:
   under the single-client design, and `bin/main.ml` (unaffected by this
   refactor, since it never used `Reflector`/`Controller`) was sanity
   checked to still LIST+WATCH correctly.
+- **`bin/hello_operator.ml` / `bin/periodic_demo.ml` /
+  `bin/owned_child_demo.ml`**: all three run against a real cluster.
+  `hello_operator` correctly synced and logged every pre-existing
+  ConfigMap at startup. `periodic_demo` printed a "tick" for a pre-
+  existing ConfigMap roughly every 10s with *no* `kubectl edit`/`apply`
+  ever issued against it, confirming `Requeue_after` genuinely
+  self-schedules independent of watch events, not just on the first
+  reconcile. `owned_child_demo` is where this batch's real risk was —
+  it's the only demo calling `Client.get`/`create_object`/`update` for a
+  *different* Kind than the one its `Controller` watches: confirmed via
+  `kubectl get configmap ... -o jsonpath='{.metadata.ownerReferences}'`
+  that a freshly-created `App` got a real child ConfigMap with a correct
+  owner reference (right `apiVersion`/`kind`/`name`/`uid`), confirmed a
+  second reconcile against the same state hit the "already up to date"
+  no-op branch instead of re-PUTting, and then — the actual point of the
+  demo — `kubectl delete app hello-app` while the program ran, and
+  confirmed via `kubectl get configmap hello-app-config` returning
+  `NotFound` within a few seconds that Kubernetes' *own* garbage
+  collector deleted the child, with no finalizer and no delete-handling
+  code in the reconciler at all beyond logging. All three also confirmed
+  clean SIGINT shutdown (exit code 0).
+- **`test/test_reconciler.ml`**: run via `dune runtest` (no cluster) —
+  confirmed a local TCP listener started outside Eio is sufficient for
+  `Client.create`'s eager connect to succeed, that the four reconcile
+  cases (gone/already-correct/needs-update/stale-status) return the
+  expected `action`/`status`, and that none of them perform any HTTP
+  I/O — the test itself asserts this, not just a comment claiming it:
+  the stub listener counts accepted connections, and the test checks
+  that count is unchanged after running all four reconcile cases versus
+  a baseline taken right after `Client.create`'s own initial connect.
+  Verified stable across 5 repeated runs (the count comparison is
+  racing a background accept thread, mitigated with a couple of short
+  `Eio.Time.sleep` calls rather than assumed to be safe by construction).

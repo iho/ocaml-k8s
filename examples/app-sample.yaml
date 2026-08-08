@@ -1,0 +1,7 @@
+apiVersion: example.com/v1
+kind: App
+metadata:
+  name: hello-app
+  namespace: default
+spec:
+  image: nginx:latest

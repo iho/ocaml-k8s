@@ -4,7 +4,12 @@
     controller that creates child objects on behalf of a CR sets this on
     the children it creates; nothing in this library does that
     automatically (there's no "owns" declaration anywhere yet — a
-    reconciler that creates children builds this by hand today). *)
+    reconciler that creates children builds this by hand today, using
+    {!Client.get}/{!Client.create_object}/{!Client.update} directly — see
+    [bin/owned_child_demo.ml] for the full pattern, including why it
+    needs no finalizer: the child's ownerReference is what makes
+    Kubernetes' own garbage collector remove it, which a finalizer would
+    only get in the way of). *)
 type t =
   { api_version : string
   ; kind : string

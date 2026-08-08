@@ -1,3 +1,7 @@
 (test
  (name test_workqueue)
  (libraries eio eio_main k8s))
+
+(test
+ (name test_reconciler)
+ (libraries eio eio_main k8s unix threads.posix))

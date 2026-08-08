@@ -25,3 +25,15 @@
 (executable
  (name webapp_gen_demo)
  (libraries eio eio_main piaf uri yojson k8s webapp_generated))
+
+(executable
+ (name hello_operator)
+ (libraries eio eio_main piaf uri yojson k8s))
+
+(executable
+ (name periodic_demo)
+ (libraries eio eio_main piaf uri yojson k8s))
+
+(executable
+ (name owned_child_demo)
+ (libraries eio eio_main piaf uri yojson k8s))
