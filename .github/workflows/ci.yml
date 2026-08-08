@@ -22,7 +22,15 @@ jobs:
           dune-cache: true
 
       - name: Install dependencies
-        run: opam install --deps-only --with-test --with-doc .
+        # --deps-only grabs k8s.opam's deps (the library's), which is not
+        # enough for the full default build: gen/ needs yaml and generated/
+        # needs ppx_deriving_yojson, neither of which the library itself
+        # depends on (see README "Building and testing this repo"). Install
+        # those extra build/test deps explicitly so `dune build` of the
+        # whole workspace works.
+        run: |
+          opam install --deps-only --with-test --with-doc .
+          opam install yaml ppx_deriving_yojson
 
       - name: Build
         run: opam exec -- dune build
