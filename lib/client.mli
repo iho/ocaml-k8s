@@ -126,3 +126,39 @@ val update_status : t -> resource:(module Resource.S with type t = 'a) -> 'a -> 
     standard (it's what client-go's [UpdateStatus] does too). Untyped/JSON
     at this layer, same as [list]/[watch]: the typed marshalling
     ([R.with_status]) happens one layer up, in [Controller]. *)
+
+val delete :
+   t
+  -> resource:(module Resource.S with type t = 'a)
+  -> ?namespace:string
+  -> name:string
+  -> ?resource_version:string
+  -> unit
+  -> (unit, Error.t) result
+(** DELETEs [.../<plural>/<name>]. When [resource_version] is given, it's
+    sent as a [DeleteOptions] precondition — a [metadata.resourceVersion]
+    optimistic-concurrency check that returns a 409 (as [Error (Api_error
+    _)] with [Status.is_conflict]) instead of deleting if the object has
+    since changed. [Ok ()] on any successful status; the response body is
+    discarded (a DELETE returns either a [Status] object or nothing, never
+    the resource itself). *)
+
+val patch :
+   t
+  -> resource:(module Resource.S with type t = 'a)
+  -> ?namespace:string
+  -> name:string
+  -> body:Yojson.Safe.t
+  -> unit
+  -> ('a, Error.t) result
+(** PATCHes [.../<plural>/<name>] with an RFC 7386 merge patch (content
+    type [application/merge-patch+json]) — a sparse object whose fields are
+    merged over the server's current state, leaving unspecified fields
+    untouched. Unlike {!update}'s whole-object PUT it cannot collide on
+    fields it isn't setting, which makes it the standard way to touch just
+    [status] (or one [spec] field) without carrying a fresh copy of the
+    whole object. Returns the server's version of the object (with the
+    merged [resourceVersion]) on success. The [body] is raw JSON here,
+    deliberately: constructing a merge patch usually means picking a subset
+    of an object's fields, which the typed [Resource.S] layer can't express
+    — a caller does it directly against the JSON. *)

@@ -296,3 +296,55 @@ let put_object (type a) t ~resource:(module R : Resource.S with type t = a) ~sub
 
 let update t ~resource obj = put_object t ~resource ~subresource:None obj
 let update_status t ~resource obj = put_object t ~resource ~subresource:(Some "status") obj
+
+(* ---------------------------------------------------------------------- *)
+(* DELETE                                                                 *)
+(* ---------------------------------------------------------------------- *)
+
+let delete (type a) t ~resource:(module R : Resource.S with type t = a) ?namespace ~name ?resource_version () =
+  let path = Printf.sprintf "%s/%s" (rest_path (module R) ~namespace) name in
+  let headers, body =
+    match resource_version with
+    | None -> t.headers, None
+    | Some rv ->
+      (* Conditional delete — optimistic concurrency expressed as a DELETE
+         body's [preconditions], exactly how a PUT's resourceVersion check
+         works: the object is deleted only if its current resourceVersion
+         still matches [rv]. A stale caller gets a 409 rather than silently
+         deleting an object someone else just updated. Mirrors client-go's
+         [DeleteOptions]. Useful for e.g. garbage-collecting a child only
+         if it's still the one we think it is. *)
+      let preconditions = `Assoc [ "preconditions", `Assoc [ "resourceVersion", `String rv ] ] in
+      ("content-type", "application/json") :: t.headers, Some (Piaf.Body.of_string (Yojson.Safe.to_string preconditions))
+  in
+  match Piaf.Client.delete t.piaf ~headers ?body path with
+  | Error e -> Error (Error.Http (Piaf.Error.to_string e))
+  | Ok response ->
+    let status = Piaf.Response.status response in
+    if Piaf.Status.is_successful status
+    then Ok ()
+    else (
+      let body = match Piaf.Body.to_string (Piaf.Response.body response) with Ok b -> b | Error _ -> "" in
+      Error (error_of_response status body))
+
+(* ---------------------------------------------------------------------- *)
+(* PATCH                                                                  *)
+(* ---------------------------------------------------------------------- *)
+
+let patch (type a) t ~resource:(module R : Resource.S with type t = a) ?namespace ~name ~body () =
+  let path = Printf.sprintf "%s/%s" (rest_path (module R) ~namespace) name in
+  let headers = ("content-type", "application/merge-patch+json") :: t.headers in
+  let body = Piaf.Body.of_string (Yojson.Safe.to_string body) in
+  match Piaf.Client.patch t.piaf ~headers ~body path with
+  | Error e -> Error (Error.Http (Piaf.Error.to_string e))
+  | Ok response ->
+    let status = Piaf.Response.status response in
+    (match Piaf.Body.to_string (Piaf.Response.body response) with
+     | Error e -> Error (Error.Http (Piaf.Error.to_string e))
+     | Ok resp ->
+       if not (Piaf.Status.is_successful status)
+       then Error (error_of_response status resp)
+       else (
+         match R.of_json (Yojson.Safe.from_string resp) with
+         | Ok obj -> Ok obj
+         | Error msg -> Error (Error.Decode msg)))

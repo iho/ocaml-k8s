@@ -118,8 +118,11 @@ reconciler with no CRD YAML, since there's no schema to hand-write.
   see `test/test_reconciler.ml`.
 - **`Controller.Make(Reconciler)`** — wires a `Reflector`, a `Cache`, and
   a `Workqueue` around your reconciler, running `workers` worker fibers.
-  Emits Prometheus-shaped metrics on every reconcile regardless of
-  whether anything's listening (see "Metrics").
+  Applies the reconciler's requested status write itself; if that PUT hits
+  a 409 conflict it refetches the object from the API server and retries
+  once before falling back to a backoff requeue. Emits Prometheus-shaped
+  metrics on every reconcile regardless of whether anything's listening
+  (see "Metrics").
 - **`Manager`** — aggregates controllers for different Kinds under one
   SIGINT/SIGTERM handler, with `with_leader_election` for active/standby
   HA via a `coordination.k8s.io/v1` Lease.
@@ -127,12 +130,14 @@ reconciler with no CRD YAML, since there's no schema to hand-write.
   `Client.t`, `log`, `sleep`, `metrics`, and a non-blocking
   `is_cancelled` check. Never a raw `Eio.Switch.t`.
 - **`Client.t`** — the low-level piece, if you need it directly:
-  LIST/WATCH/GET/CREATE/UPDATE/UPDATE-STATUS for any `Resource.S`. A
-  caller only ever builds *one* `Client.t`, no matter how many
-  controllers or a leader-election loop share it — `Reflector`/
-  `Controller` each open their own dedicated connection internally via
-  `Client.clone`, so a long-lived WATCH can never starve other traffic
-  sharing the same connection.
+  LIST/WATCH/GET/CREATE/UPDATE/DELETE/PATCH/UPDATE-STATUS for any
+  `Resource.S` — `DELETE` takes an optional `resourceVersion` precondition
+  (a 409-guarded delete), `PATCH` is RFC 7386 merge-patch for touching a
+  subset of an object without a full-object PUT. A caller only ever builds
+  *one* `Client.t`, no matter how many controllers or a leader-election
+  loop share it — `Reflector`/`Controller` each open their own dedicated
+  connection internally via `Client.clone`, so a long-lived WATCH can never
+  starve other traffic sharing the same connection.
 
 ## Features
 
@@ -318,6 +323,9 @@ each piece is built, not by an automated E2E suite.
   deliberately: an uncaught exception is treated as a bug and propagates
   (failing that controller's switch), not silently converted into an
   endless requeue loop.
-- A failed status PUT overrides the reconciler's requested action with a
-  backoff requeue, even if it said `Done` — its intent was computed
-  assuming the write would land.
+- A status PUT that fails for any *non*-conflict reason (a network blip,
+  a transient 500, ...) still overrides the reconciler's requested action
+  with a backoff requeue, even if it said `Done` — its intent was computed
+  assuming the write would land. A 409 *conflict* is handled specially
+  (one refetch-and-retry, see "Core concepts"); this limitation is about
+  the other failure classes.
