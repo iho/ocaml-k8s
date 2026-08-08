@@ -12,7 +12,16 @@ module Error : sig
     (** 410: the watch's [resourceVersion] fell out of etcd's compaction
         window. Distinguished from other HTTP errors so a {!Reflector} can
         react by re-LISTing instead of treating it as fatal. *)
-    | Http of string
+    | Api_error of Status.t
+    (** Any other non-2xx response whose body parsed as a Kubernetes
+        [meta/v1.Status] object — i.e. essentially every API error, since
+        that's what the server sends. Carries [reason]/[code] structured,
+        so callers (see [Reconcile_error.of_client_error]) can distinguish
+        e.g. a 409 conflict from other failures without string-matching a
+        formatted message. *)
+    | Http of string (** a non-2xx response whose body did *not* parse as
+                          a Status object (rare — a misbehaving proxy, an
+                          HTML error page, ...) *)
     | Decode of string
 
   val to_string : t -> string
@@ -66,6 +75,29 @@ val watch :
     stream, [Error.Gone] is returned, or the enclosing [Switch] is
     cancelled — cancellation interrupts the underlying streaming HTTP read,
     same as the already-verified low-level watch. *)
+
+val get :
+   t
+  -> resource:(module Resource.S with type t = 'a)
+  -> ?namespace:string
+  -> name:string
+  -> unit
+  -> ('a option, Error.t) result
+(** [Ok None] specifically on 404 (not found) — every other failure,
+    including a decode error, is [Error]. Used by {!Leader_election} to
+    check a Lease's current state before deciding whether to create,
+    steal, or renew it. *)
+
+val create_object :
+   t
+  -> resource:(module Resource.S with type t = 'a)
+  -> ?namespace:string
+  -> 'a
+  -> ('a, Error.t) result
+(** POSTs [R.to_json obj] to the collection path (.../<plural>), returning
+    the server's version of it (with [resourceVersion]/[uid]/etc. now
+    populated) on success. Used by {!Leader_election} to create a Lease
+    that doesn't exist yet. *)
 
 val update : t -> resource:(module Resource.S with type t = 'a) -> 'a -> (unit, Error.t) result
 (** PUTs [R.to_json obj] to [.../<plural>/<name>] — replaces the whole

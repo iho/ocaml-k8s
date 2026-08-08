@@ -35,6 +35,7 @@ spec:
                   type: integer
                 observedGeneration:
                   type: integer
+              required: [readyReplicas, observedGeneration]
           required: [spec]
       additionalPrinterColumns:
         - name: Image

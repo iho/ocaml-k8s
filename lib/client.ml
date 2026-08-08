@@ -1,15 +1,36 @@
 module Error = struct
   type t =
     | Gone of { last_resource_version : string }
+    | Api_error of Status.t
     | Http of string
     | Decode of string
 
   let to_string = function
     | Gone { last_resource_version } ->
       Printf.sprintf "410 Gone (resourceVersion=%s too old)" last_resource_version
+    | Api_error (s : Status.t) ->
+      Printf.sprintf "%s%s%s" (Option.value s.reason ~default:s.status)
+        (match s.code with Some c -> Printf.sprintf " (%d)" c | None -> "")
+        (match s.message with Some m -> ": " ^ m | None -> "")
     | Http s -> s
     | Decode s -> "decode error: " ^ s
 end
+
+(* Every non-2xx response's body, in practice, is a meta/v1.Status object
+   -- that's what the server sends for essentially every API error. Parse
+   it structurally when possible so callers can match on [reason]/[code]
+   (see [Reconcile_error.of_client_error]) instead of string-matching a
+   formatted message; fall back to the raw body when it isn't one (a
+   misbehaving proxy, an HTML error page, ...). *)
+let error_of_response piaf_status body =
+  let status_line = Piaf.Status.to_string piaf_status in
+  let fallback () = Error.Http (Printf.sprintf "%s: %s" status_line body) in
+  match (try Some (Yojson.Safe.from_string body) with _ -> None) with
+  | None -> fallback ()
+  | Some json -> (
+    match Status.of_json json with
+    | Some s -> Error.Api_error s
+    | None -> fallback ())
 
 type t =
   { piaf : Piaf.Client.t
@@ -129,7 +150,7 @@ let list (type a) t ~resource:(module R : Resource.S with type t = a) ?namespace
      | Error e -> Error (Error.Http (Piaf.Error.to_string e))
      | Ok body ->
        if not (Piaf.Status.is_successful status)
-       then Error (Error.Http (Printf.sprintf "%s: %s" (Piaf.Status.to_string status) body))
+       then Error (error_of_response status body)
        else (
          let json = Yojson.Safe.from_string body in
          match Yojson.Safe.Util.(json |> member "metadata" |> member "resourceVersion" |> to_string_option) with
@@ -174,7 +195,7 @@ let watch (type a) t ~resource:(module R : Resource.S with type t = a) ?namespac
     else if not (Piaf.Status.is_successful status)
     then (
       let body = match Piaf.Body.to_string (Piaf.Response.body response) with Ok b -> b | Error _ -> "" in
-      Error (Error.Http (Printf.sprintf "%s: %s" (Piaf.Status.to_string status) body)))
+      Error (error_of_response status body))
     else (
       let handle_line line =
         match Yojson.Safe.from_string line with
@@ -203,6 +224,46 @@ let watch (type a) t ~resource:(module R : Resource.S with type t = a) ?namespac
       | Error e -> Error (Error.Http (Piaf.Error.to_string e)))
 
 (* ---------------------------------------------------------------------- *)
+(* GET / CREATE                                                          *)
+(* ---------------------------------------------------------------------- *)
+
+let get (type a) t ~resource:(module R : Resource.S with type t = a) ?namespace ~name () =
+  let path = Printf.sprintf "%s/%s" (rest_path (module R) ~namespace) name in
+  match Piaf.Client.get t.piaf ~headers:t.headers path with
+  | Error e -> Error (Error.Http (Piaf.Error.to_string e))
+  | Ok response ->
+    let status = Piaf.Response.status response in
+    (match Piaf.Body.to_string (Piaf.Response.body response) with
+     | Error e -> Error (Error.Http (Piaf.Error.to_string e))
+     | Ok body ->
+       if Piaf.Status.to_code status = 404
+       then Ok None
+       else if not (Piaf.Status.is_successful status)
+       then Error (error_of_response status body)
+       else (
+         match R.of_json (Yojson.Safe.from_string body) with
+         | Ok obj -> Ok (Some obj)
+         | Error msg -> Error (Error.Decode msg)))
+
+let create_object (type a) t ~resource:(module R : Resource.S with type t = a) ?namespace (obj : a) =
+  let path = rest_path (module R) ~namespace in
+  let body = Piaf.Body.of_string (Yojson.Safe.to_string (R.to_json obj)) in
+  let headers = ("content-type", "application/json") :: t.headers in
+  match Piaf.Client.post t.piaf ~headers ~body path with
+  | Error e -> Error (Error.Http (Piaf.Error.to_string e))
+  | Ok response ->
+    let status = Piaf.Response.status response in
+    (match Piaf.Body.to_string (Piaf.Response.body response) with
+     | Error e -> Error (Error.Http (Piaf.Error.to_string e))
+     | Ok body ->
+       if not (Piaf.Status.is_successful status)
+       then Error (error_of_response status body)
+       else (
+         match R.of_json (Yojson.Safe.from_string body) with
+         | Ok obj -> Ok obj
+         | Error msg -> Error (Error.Decode msg)))
+
+(* ---------------------------------------------------------------------- *)
 (* UPDATE / UPDATE STATUS                                                 *)
 (* ---------------------------------------------------------------------- *)
 
@@ -223,7 +284,7 @@ let put_object (type a) t ~resource:(module R : Resource.S with type t = a) ~sub
     then Ok ()
     else (
       let body = match Piaf.Body.to_string (Piaf.Response.body response) with Ok b -> b | Error _ -> "" in
-      Error (Error.Http (Printf.sprintf "%s: %s" (Piaf.Status.to_string status) body)))
+      Error (error_of_response status body))
 
 let update t ~resource obj = put_object t ~resource ~subresource:None obj
 let update_status t ~resource obj = put_object t ~resource ~subresource:(Some "status") obj

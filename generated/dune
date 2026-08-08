@@ -1,0 +1,18 @@
+; web_app.ml is produced by a dune rule, not hand-written -- see
+; gen/gen_resource.ml. Regenerated automatically whenever the CRD YAML or
+; the generator itself changes, same as any other dune codegen rule.
+(rule
+ (targets web_app.ml)
+ (deps
+  %{exe:../gen/gen_resource.exe}
+  ../examples/webapp-crd.yaml)
+ (action
+  (with-stdout-to
+   web_app.ml
+   (run %{exe:../gen/gen_resource.exe} ../examples/webapp-crd.yaml))))
+
+(library
+ (name webapp_generated)
+ (libraries k8s ppx_deriving_yojson.runtime)
+ (preprocess
+  (pps ppx_deriving_yojson)))

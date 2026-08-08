@@ -108,7 +108,7 @@ module Web_app_reconciler = struct
           (Request.to_string req);
         match Finalizer.remove (Context.client ctx) ~resource:(module Web_app) app ~name:finalizer_name with
         | Ok () -> Ok (Reconcile_result.done_ ())
-        | Error e -> Error (Reconcile_error.Api_error (Client.Error.to_string e)))
+        | Error e -> Error (Reconcile_error.of_client_error e))
       else Ok (Reconcile_result.done_ ())
     | Some app when not (Finalizer.has ~resource:(module Web_app) app ~name:finalizer_name) ->
       (* Not yet marked for deletion, and doesn't have our finalizer yet:
@@ -118,7 +118,7 @@ module Web_app_reconciler = struct
       Context.log ctx "WEBAPP  %s: adding finalizer" (Request.to_string req);
       (match Finalizer.add (Context.client ctx) ~resource:(module Web_app) app ~name:finalizer_name with
        | Ok () -> Ok (Reconcile_result.done_ ())
-       | Error e -> Error (Reconcile_error.Api_error (Client.Error.to_string e)))
+       | Error e -> Error (Reconcile_error.of_client_error e))
     | Some app ->
       let desired = app.spec.replicas in
       (* No real Deployment behind this demo -- pretend reconciliation

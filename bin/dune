@@ -17,3 +17,11 @@
 (executable
  (name webapp_demo)
  (libraries eio eio_main piaf uri yojson k8s))
+
+(executable
+ (name leader_demo)
+ (libraries eio eio_main piaf uri yojson k8s))
+
+(executable
+ (name webapp_gen_demo)
+ (libraries eio eio_main piaf uri yojson k8s webapp_generated))

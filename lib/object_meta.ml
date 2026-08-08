@@ -6,6 +6,7 @@ type t =
   ; generation : int option
   ; deletion_timestamp : string option
   ; finalizers : string list
+  ; owner_references : Owner_reference.t list
   }
 
 open Yojson.Safe.Util
@@ -21,6 +22,10 @@ let of_json j =
       (match member "finalizers" j with
        | `List l -> List.filter_map to_string_option l
        | _ -> [])
+  ; owner_references =
+      (match member "ownerReferences" j with
+       | `List l -> List.filter_map Owner_reference.of_json l
+       | _ -> [])
   }
 
 let to_json t =
@@ -33,4 +38,10 @@ let to_json t =
        ; Option.map (fun g -> "generation", `Int g) t.generation
        ; Option.map (fun dt -> "deletionTimestamp", `String dt) t.deletion_timestamp
        ; (if t.finalizers = [] then None else Some ("finalizers", `List (List.map (fun f -> `String f) t.finalizers)))
+       ; (if t.owner_references = []
+          then None
+          else Some ("ownerReferences", `List (List.map Owner_reference.to_json t.owner_references)))
        ])
+
+let of_yojson j = Ok (of_json j)
+let to_yojson = to_json

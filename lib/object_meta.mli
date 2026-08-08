@@ -12,6 +12,7 @@ type t =
   ; generation : int option
   ; deletion_timestamp : string option
   ; finalizers : string list
+  ; owner_references : Owner_reference.t list
   }
 
 val of_json : Yojson.Safe.t -> t
@@ -20,3 +21,14 @@ val of_json : Yojson.Safe.t -> t
     the ["metadata"] object itself (not the whole Kubernetes object). *)
 
 val to_json : t -> Yojson.Safe.t
+
+val of_yojson : Yojson.Safe.t -> (t, string) result
+(** = [fun j -> Ok (of_json j)] — [of_json] never fails (see its own doc
+    comment), so this just fits [ppx_deriving_yojson]'s [(t, string)
+    result] convention. A [[@@deriving yojson]]-annotated CRD record with
+    a [metadata : Object_meta.t] field calls this and {!to_yojson} by
+    that naming convention automatically — see gen/gen_resource.ml,
+    which relies on it. *)
+
+val to_yojson : t -> Yojson.Safe.t
+(** = {!to_json}. *)

@@ -10,16 +10,20 @@ which is a strictly-typed operator framework (Informer/Reflector, Workqueue,
 Controller, Manager — see "Library layout & roadmap" below). `lib/client.ml`
 implements LIST+WATCH+status-updates generically for any `Resource.S`, and
 reconcilers are written against real OCaml types for the resources they own
-— including a real CRD's spec/status, decoded/encoded by hand — not raw
-JSON; see `bin/webapp_demo.ml` for a full typed example.
+— including a real CRD's spec/status — not raw JSON. A CRD's typed
+`Resource.S` module can be hand-written (`bin/webapp_demo.ml`) or generated
+from the CRD's own YAML (`gen/gen_resource.ml` + `generated/`,
+`bin/webapp_gen_demo.ml`) — both produce an ordinary module satisfying the
+same signature, and nothing downstream can tell which.
 
 ## Prerequisites
 
 - OCaml >= 5.1, dune >= 3.0
-- opam packages: `eio`, `eio_main`, `piaf`, `uri`, `yojson`
+- opam packages: `eio`, `eio_main`, `piaf`, `uri`, `yojson`, `yaml`,
+  `ppx_deriving_yojson`
 
 ```sh
-opam install eio_main piaf uri yojson
+opam install eio_main piaf uri yojson yaml ppx_deriving_yojson
 ```
 
 Piaf's C stubs link against OpenSSL. On macOS with Homebrew, OpenSSL is
@@ -108,24 +112,27 @@ LIST+WATCH client. Current status per module:
 
 | Module | Status |
 |---|---|
-| `Gvk`, `Request`, `Watch_event`, `Object_meta` | done |
-| `Resource` | done — `Resource.S` includes a `status` subresource type (`status_of_json`/`status_to_json`/`status`/`with_status`); `Resource.Unstructured` and typed CRD bindings (e.g. `bin/webapp_demo.ml`'s `Web_app`) both implement it |
-| `Client` | done — LIST/WATCH/`update`/`update_status` generalised over any `Resource.S`, used by `bin/main.ml` |
+| `Gvk`, `Request`, `Watch_event`, `Object_meta` | done — `Object_meta` includes `owner_references : Owner_reference.t list` |
+| `Type_meta`, `List_meta`, `Status` | done — `apiVersion`/`kind` read without knowing the Kind, a LIST response's own metadata, and Kubernetes' generic `meta/v1.Status` error-body type, respectively |
+| `Resource` | done — `Resource.S` includes a `status` subresource type (`status_of_json`/`status_to_json`/`status`/`with_status`); `Resource.Unstructured` and typed CRD bindings (hand-written, e.g. `bin/webapp_demo.ml`'s `Web_app`, or generated — see below) all implement it |
+| `Client` | done — LIST/WATCH/`get`/`create_object`/`update`/`update_status` generalised over any `Resource.S`; non-2xx responses are parsed into `Error.Api_error of Status.t` when the body is a Status object (essentially always), not just a formatted string |
 | `Context`, `Cache` | done |
 | `Reflector` | done — List-then-Watch-forever, full resync-as-sync-events on every (re)LIST (incl. on 410/dropped connection) with capped exponential backoff; see `bin/reflector_demo.ml` |
 | `Workqueue` | done — `Eio.Mutex`/`Eio.Condition`-backed dedup queue + per-item exponential backoff; see `test/test_workqueue.ml` |
-| `Reconcile_result`, `Reconcile_error`, `Reconciler` | done — `Reconciler.S` bundles a `Resource.S` (`module R`) with a `reconcile : Context.t -> Request.t -> R.t option -> (R.status Reconcile_result.t, Reconcile_error.t) result`, so `Controller.Make` takes one functor argument |
+| `Reconcile_result`, `Reconcile_error`, `Reconciler` | done — `Reconciler.S` bundles a `Resource.S` (`module R`) with a `reconcile : Context.t -> Request.t -> R.t option -> (R.status Reconcile_result.t, Reconcile_error.t) result`, so `Controller.Make` takes one functor argument. `Reconcile_error.of_client_error` maps a `Client.Error.t` to `Conflict` iff it's a real 409 (via `Status.is_conflict`), making that case reachable for the first time instead of dead code |
 | `Controller` | done — wires Reflector + Cache + Workqueue + a `Reconciler.S`, N worker fibers, status-subresource PUTs; see `bin/controller_demo.ml` (untyped/`Unstructured`) and `bin/webapp_demo.ml` (typed CRD, real status update) |
-| `Manager` | done — multi-controller aggregation, centralised SIGINT/SIGTERM handling; see `bin/manager_demo.ml` |
+| `Manager` | done — multi-controller aggregation, centralised SIGINT/SIGTERM handling, `with_leader_election`; see `bin/manager_demo.ml` and `bin/leader_demo.ml` |
 | `Finalizer` | done — `has`/`add`/`remove`, JSON-level (no `with_finalizers` needed on `Resource.S`); see `bin/webapp_demo.ml` |
+| `Lease`, `Leader_election` | done — typed `coordination.k8s.io/v1` Lease binding + an acquire/steal/renew loop (patient acquire, hard-deadline renew, fails the switch via `Leadership_lost` if renewal can't keep up); see `bin/leader_demo.ml` |
+| `gen/gen_resource.ml` | done — a small, selective CRD-YAML-to-`Resource.S` generator (see "Generating typed CRD bindings" below); `generated/web_app.ml` (built by a dune rule from `examples/webapp-crd.yaml`) and `bin/webapp_gen_demo.ml` prove it's a drop-in replacement for the hand-written `Web_app` |
 
 This completes the roadmap's core bottom-up build-out plus the finalizer
-extension point (`Phase 6` — health checks, leader election — remains
-future work; see stub signatures in `lib/manager.mli`). `bin/main.ml` still
-doesn't use `Reflector`/`Controller`/`Manager` — it calls
+and leader-election extension points (`Phase 6` health/readiness checks
+remain future work — stub signatures in `lib/manager.mli`). `bin/main.ml`
+still doesn't use `Reflector`/`Controller`/`Manager` — it calls
 `Client.list`/`Client.watch` directly, same shape as the original
 hardcoded version, just parameterised by `Resource.Unstructured` for Pods
-instead of hand-written paths/JSON decoding. Four separate, minimal demo
+instead of hand-written paths/JSON decoding. Six separate, minimal demo
 tools exercise the higher layers directly against a real cluster:
 
 ```sh
@@ -134,13 +141,102 @@ dune exec bin/reflector_demo.exe -- kube-system   # Reflector + Cache only
 dune exec bin/controller_demo.exe -- kube-system  # full Reflector->Workqueue->Reconciler loop, untyped (Unstructured)
 dune exec bin/manager_demo.exe -- kube-system     # two controllers (Pods + ConfigMaps) under one Manager
 
-# typed CRD example, with a real /status subresource update and finalizer:
+# typed CRD example, with a real /status subresource update and finalizer
+# (hand-written Web_app -- bin/webapp_gen_demo.exe below is the same thing
+# against the *generated* one):
 kubectl apply -f examples/webapp-crd.yaml
 kubectl apply -f examples/webapp-sample.yaml
 dune exec bin/webapp_demo.exe -- default
-# then, in another shell, while it's running:
+dune exec bin/webapp_gen_demo.exe -- default
+# then, in another shell, while either is running:
 kubectl delete webapp hello-web    # stays "Terminating" until the finalizer is removed
+
+# leader election: run two instances competing for the same Lease
+dune exec bin/leader_demo.exe -- candidate-a kube-system
+dune exec bin/leader_demo.exe -- candidate-b kube-system   # in another shell
+# kill -9 whichever one is currently reconciling and watch the other take over
 ```
+
+## Generating typed CRD bindings
+
+`gen/gen_resource.ml` is a small, deliberately selective generator — not a
+general OpenAPI compiler. It reads one CRD YAML's chosen `.spec.versions[]`
+entry (preferring `storage: true`, falling back to the first `served:
+true`, falling back to the first version present) and prints an OCaml
+module implementing `Resource.S` to stdout:
+
+```sh
+dune exec gen/gen_resource.exe -- examples/webapp-crd.yaml
+```
+
+It walks `openAPIV3Schema.properties.{spec,status}` (`object`+`properties`
+→ a record, recursing; `string`/`integer`/`number`/`boolean` → the obvious
+OCaml type; `array`+`items` → `_ list`; anything else it doesn't
+understand — `oneOf`/`anyOf`/`allOf`, a map via `additionalProperties`, a
+schema-less object — becomes a `Yojson.Safe.t` passthrough field rather
+than blocking generation or guessing wrong), and emits
+[`ppx_deriving_yojson`](https://github.com/ocaml-ppx/ppx_deriving_yojson)-annotated
+record types (`[@key "..."]` where the JSON name differs from the
+snake_case OCaml field name, `[@default None]` for fields absent from the
+schema's `required` list) plus the mechanical `Resource.S` wiring around
+an embedded `Object_meta.t` — six lines, identical for every Kind, so it's
+emitted directly rather than templated. `generated/dune` shows the
+reference wiring: a `(rule ...)` runs the generator against
+`examples/webapp-crd.yaml` at build time (regenerating whenever the CRD
+YAML or the generator changes, like any other dune codegen), and a
+`(library ...)` in the same directory picks up the rule's target with
+`(preprocess (pps ppx_deriving_yojson))`.
+
+Object_meta gained `of_yojson`/`to_yojson` aliases (`= fun j -> Ok (of_json
+j)` / `= to_json`) purely so a generated record with a `metadata :
+Object_meta.t` field can derive its own (de)serializer automatically —
+`ppx_deriving_yojson` calls a nested custom type's `of_yojson`/`to_yojson`
+by naming convention, and `Object_meta` only had `of_json`/`to_json`
+before this.
+
+### Three real bugs, all found by generating and then actually running the output — not by reading the generator's code
+
+1. **`@key`/`@default` attributes silently ignored when parenthesized.**
+   The first draft wrote `(int option [@default None])`, modelled on one
+   of `ppx_deriving_yojson`'s own README examples, which shows `@default`
+   used exactly that way. Wrapping the whole `type [@attrs]` group in
+   parens compiles fine but the attributes don't attach where the deriver
+   looks for them — every field decode failed. Found with a standalone
+   throwaway (`ppx_check/`, not part of this repo) exercising the exact
+   annotation shapes against real JSON *before* writing the generator
+   around them, which is what caught it — not the generator's own
+   (correctly unparenthesized, once fixed) output. Fixed by dropping the
+   parens: `int option [@key "..."] [@default None]`, matching the
+   README's other example (`lat : float [@key "Latitude"]`) exactly.
+2. **`[@@deriving yojson]` decodes strictly by default.** Every LIST
+   failed with a generic decode error once the generator's (corrected)
+   output was actually run against a real cluster. Cause: strict mode
+   rejects any JSON key without a matching record field, and a real
+   Kubernetes object always has `apiVersion`/`kind` at the top level,
+   which the generated `type t` — only `metadata`/`spec`/`status` —
+   doesn't declare. Fixed by generating `[@@deriving yojson { strict =
+   false }]` on every emitted type; `Resource.Unstructured` and the
+   hand-written examples were never at risk of this since they read
+   fields on demand rather than requiring an exact match.
+3. **Generated `to_json` never emitted `apiVersion`/`kind` on writes.**
+   With (1) and (2) fixed, LIST/WATCH worked but adding a finalizer failed
+   every time with a 400 ("Object 'Kind' is missing") — legible immediately
+   as a *structured* `reason`/`code` rather than a raw string, thanks to
+   the new `Status`-based error parsing (bug 2 above, from the *previous*
+   design turn, paying for itself on its first real use). Cause:
+   `apiVersion`/`kind` aren't fields on the record — nothing decodes them
+   (see bug 2) — so bare `to_yojson` never wrote them either, but the API
+   server requires them on every write, not just reads. The hand-written
+   examples inject them from `gvk` inside `to_json`, never storing them on
+   `t`; the generator does the same now (`to_json` wraps `to_yojson`'s
+   output, prepending `apiVersion`/`kind`) instead of aliasing `to_json =
+   to_yojson` directly.
+
+After all three fixes, `bin/webapp_gen_demo.ml` (identical reconcile logic
+to `bin/webapp_demo.ml`, just `module Web_app = Webapp_generated.Web_app`
+instead of an inline definition) passed the exact same finalizer-add,
+status-PUT, and finalizer-delete-and-gone scenarios as the hand-written
+version — see "Manual verification" below.
 
 ## Notes / limitations
 
@@ -246,6 +342,47 @@ kubectl delete webapp hello-web    # stays "Terminating" until the finalizer is 
   second, no-op reconcile logging "already correct") instead of
   self-triggering forever, and that Ctrl-C still cleanly closes both
   connections (~1s exit).
+- `Leader_election`'s renew loop treats *any* renewal failure the same,
+  whether it's a network error or another identity having legitimately
+  won a race — both just count toward the `lease_duration` failure
+  budget. This is intentionally simple (client-go distinguishes more
+  cases); the practical effect is a candidate that briefly can't reach
+  the API server gives up leadership exactly as fast as one that actually
+  lost it, which is the conservative, safe direction to be imprecise in.
+- **Bug found via end-to-end testing, now fixed — a real, rejected
+  request**: the first version of `Leader_election`'s RFC3339 formatter
+  produced second-precision timestamps (`...05Z`), which the Kubernetes
+  API server rejected outright with a 400 for `Lease.spec.acquireTime`/
+  `renewTime` specifically — those fields deserialize as Go's
+  `metav1.MicroTime`, whose parser requires an exact 6-digit
+  fractional-seconds field (`...05.000000Z`), unlike plain
+  `metav1.Time` elsewhere. Every acquire attempt failed with a clear
+  error message, so this one was quick to diagnose and fix (always emit
+  the 6 digits, even when zero) — but a good reminder that "valid
+  RFC3339" isn't the same as "valid for this specific field." The
+  before/after fix was also verified with a small standalone date-math
+  script exercising `days_from_civil`/`epoch_of_utc`/format/parse
+  round-trips (including a leap-day case and fractional-seconds parsing)
+  independent of any cluster, since a subtly wrong staleness calculation
+  wouldn't necessarily show up as a hard error the way the format bug did.
+- **Bug found via end-to-end testing, now fixed — leader election's own
+  starvation bug**: with the format bug fixed, the very first two-candidate
+  test still showed *both* candidates simultaneously believing they were
+  leader. Root cause was the same HTTP/1.1 starvation class as the two
+  bugs above, recurring a third time, one level up: `bin/leader_demo.ml`'s
+  first version reused one `Client` for both the controller's Reflector
+  (long-lived WATCH) and `Manager`'s own Lease renewal calls (via
+  `Context.client ctx`) — the leader's renewals queued behind its own
+  controller's watch and effectively stopped firing once the controller
+  started, so its lease quietly expired within a few seconds and the other
+  candidate legitimately (and correctly, given what it could observe)
+  stole it. Not a bug in the election algorithm itself — confirmed by the
+  Lease's own `leaseTransitions` field incrementing exactly once, exactly
+  when expected, both times. Fixed by giving the demo's `Manager`/
+  `Leader_election` traffic and its controller's `Reflector` separate
+  connections, same rule as everywhere else. `Manager.with_leader_election`'s
+  doc comment now says this explicitly, since getting it wrong doesn't
+  raise an error — it just quietly breaks mutual exclusion.
 
 ## Manual verification
 
@@ -307,3 +444,41 @@ multiple times as the library grew:
   `NotFound` — the deletion genuinely completed, not just locally
   believed to have. Whole delete-to-gone cycle took well under the ~6s
   observation window.
+- **`Leader_election` / `Manager.with_leader_election`**: two
+  `bin/leader_demo.ml` instances (`candidate-a`, `candidate-b`) run
+  simultaneously against the same real cluster, competing for one Lease.
+  This is where both bugs above were found. After both fixes: confirmed
+  via `kubectl get lease -o jsonpath='{.spec}'` that exactly one candidate
+  held the lease at a time, with `leaseTransitions=0` and a `renewTime`
+  visibly advancing every ~1s while it ran (proving it was genuinely
+  renewing, not just having won the initial race) — and confirmed the
+  *other* candidate's log stayed silent after its one expected failed
+  create attempt, meaning it correctly recognized the lease was live and
+  didn't retry-spam. Then `kill -9`'d the active leader (no graceful
+  release) and confirmed the standby acquired it — `leaseTransitions=1`,
+  a fresh `acquireTime` — within the expected ~`lease_duration` window
+  (5s, shortened from the 15s default for a fast-to-observe test), and
+  resumed reconciling. Finally confirmed clean Ctrl-C shutdown (~1s) of
+  the new leader while its leader-election fiber was still active.
+- **`gen/gen_resource.ml` / generated `Web_app`**: `bin/webapp_gen_demo.ml`
+  run against the CRD/sample from the `webapp_demo.ml` scenario above,
+  using `generated/web_app.ml` (a dune rule's output, not hand-written).
+  This is where all three bugs described in "Generating typed CRD
+  bindings" were found, in sequence, each by actually running the
+  generator's current output against a real cluster rather than by
+  re-reading the generator's code. After all three fixes: reset the
+  sample object to a clean state and confirmed, via `kubectl get -o
+  jsonpath` before/after (not just program output), that the generated
+  module's reconciler added the finalizer, correctly performed a real
+  `/status` PUT (`{"observedGeneration":1,"readyReplicas":3}`, matching
+  the hand-written version's earlier result exactly), and — with a fresh
+  process — that deleting the object while it ran produced the identical
+  finalizer-blocks-then-completes-deletion sequence already verified for
+  `bin/webapp_demo.ml`: stayed present with `deletionTimestamp` set,
+  cleanup ran, finalizer removed, `kubectl get` returned `NotFound`
+  immediately after. Also independently confirmed the exact
+  `[@key]`/`[@default]` annotation syntax the generator emits (including
+  the parenthesization gotcha from bug 1) against real JSON in an
+  isolated, non-generator throwaway before trusting it in the generator's
+  own output, and confirmed clean Ctrl-C shutdown of the generated-module
+  demo (~1s, two connections, same as `webapp_demo.ml`).
