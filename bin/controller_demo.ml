@@ -22,18 +22,26 @@ module Pods = Resource.Unstructured (struct
   let namespaced = true
 end)
 
-let reconcile_count = ref 0
+(* [Atomic], not a bare [ref]: [~workers] fibers all call [reconcile]. Today
+   they're plain [Eio.Fiber.fork] fibers cooperatively scheduled on one
+   domain (see [Controller.Make(_).create]), so a bare [ref] would actually
+   be safe here -- [incr] never yields mid-update. But that's an easy
+   invariant to break by accident (spawn the workers via
+   [Eio.Domain_manager] instead, and two domains' fibers race on this same
+   cell), and it costs nothing to not depend on it in example code readers
+   copy from. *)
+let reconcile_count = Atomic.make 0
 
 module Pod_reconciler = struct
   module R = Pods
 
   let reconcile (ctx : Context.t) (req : Request.t) (pod : Pods.t option) =
-    incr reconcile_count;
+    let count = Atomic.fetch_and_add reconcile_count 1 + 1 in
     (match pod with
-     | None -> Context.log ctx "RECONCILE #%d %s: deleted" !reconcile_count (Request.to_string req)
+     | None -> Context.log ctx "RECONCILE #%d %s: deleted" count (Request.to_string req)
      | Some pod ->
        let phase = Yojson.Safe.Util.(pod |> member "status" |> member "phase" |> to_string_option) in
-       Context.log ctx "RECONCILE #%d %s: phase=%s" !reconcile_count (Request.to_string req)
+       Context.log ctx "RECONCILE #%d %s: phase=%s" count (Request.to_string req)
          (Option.value phase ~default:"?"));
     Ok (Reconcile_result.done_ ())
 end
